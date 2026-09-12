@@ -1033,21 +1033,25 @@ class RustChainMonitor:
     def get_health(self) -> Dict:
         """Check node health"""
         response = self.session.get(f"{self.node_url}/health")
+        response.raise_for_status()
         return response.json()
     
     def get_epoch(self) -> Dict:
         """Get current epoch info"""
         response = self.session.get(f"{self.node_url}/epoch")
+        response.raise_for_status()
         return response.json()
     
     def get_miners(self) -> List[Dict]:
         """Get all active miners"""
         response = self.session.get(f"{self.node_url}/api/miners")
+        response.raise_for_status()
         return response.json()
     
     def get_miner_balance(self, miner_id: str) -> float:
         """Get specific miner's RTC balance"""
         response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
+        response.raise_for_status()
         return response.json().get("balance_rtc", 0.0)
 
     def collect_network_snapshot(self) -> dict:
