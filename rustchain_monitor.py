@@ -387,20 +387,21 @@ def compare_miner_history(
     """Compare miners by recent gain and current balance."""
     now_ts = time.time() if now_ts is None else now_ts
     rows = []
-    for miner_id in miner_ids:
-        summary = get_history_summary(db_path, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
-        recent_gain = summary["daily_gain_7d"] if days == 7 else _period_value(summary, days)
-        rows.append(
-            {
-                "miner_id": miner_id,
-                "snapshots": summary["snapshots"],
-                "latest_balance": summary["latest_balance"],
-                "recent_gain": recent_gain,
-                "daily_average": (recent_gain / days) if days else recent_gain,
-                "latest_epoch": summary["latest_epoch"],
-                "last_seen": summary["last_seen"],
-            }
-        )
+    with _history_connection(db_path) as conn:
+        for miner_id in miner_ids:
+            summary = get_history_summary(db_path, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
+            recent_gain = _period_gain(conn, miner_id, now_ts, days)
+            rows.append(
+                {
+                    "miner_id": miner_id,
+                    "snapshots": summary["snapshots"],
+                    "latest_balance": summary["latest_balance"],
+                    "recent_gain": recent_gain,
+                    "daily_average": (recent_gain / days) if days else recent_gain,
+                    "latest_epoch": summary["latest_epoch"],
+                    "last_seen": summary["last_seen"],
+                }
+            )
     rows.sort(key=lambda row: (-row["recent_gain"], -row["latest_balance"], row["miner_id"]))
     return rows
 
