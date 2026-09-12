@@ -384,12 +384,13 @@ def compare_miner_history(
     now_ts: Optional[float] = None,
     days: int = 7,
 ) -> list[dict]:
-    """Compare miners by recent gain and current balance."""
+    """Compare miners by gain over the requested number of days and current balance."""
     now_ts = time.time() if now_ts is None else now_ts
     rows = []
     for miner_id in miner_ids:
         summary = get_history_summary(db_path, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
-        recent_gain = summary["daily_gain_7d"] if days == 7 else _period_value(summary, days)
+        with _history_connection(db_path) as conn:
+            recent_gain = _period_gain(conn, miner_id, now_ts, days)
         rows.append(
             {
                 "miner_id": miner_id,
@@ -403,14 +404,6 @@ def compare_miner_history(
         )
     rows.sort(key=lambda row: (-row["recent_gain"], -row["latest_balance"], row["miner_id"]))
     return rows
-
-
-def _period_value(summary: dict, days: int) -> float:
-    if days <= 1:
-        return summary["daily_gain_1d"]
-    if days <= 7:
-        return summary["daily_gain_7d"]
-    return summary["daily_gain_30d"]
 
 
 def export_history_csv(
