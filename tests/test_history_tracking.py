@@ -145,6 +145,38 @@ def test_compare_miner_history_sorts_by_recent_gain(tmp_path):
     assert rows[1]["recent_gain"] == 1.0
 
 
+def test_compare_miner_history_uses_exact_requested_window(tmp_path):
+    db_path = tmp_path / "history.db"
+    now_ts = 2_200_000_000.0
+
+    for days_ago, balance in [(40, 0.0), (20, 1.0), (10, 3.0), (3, 7.0), (1, 11.0)]:
+        rustchain_monitor.record_history_snapshot(
+            db_path,
+            miner_id="miner-window",
+            epoch=400 - days_ago,
+            balance_rtc=balance,
+            observed_at=now_ts - (days_ago * 86400),
+        )
+
+    two_day = rustchain_monitor.compare_miner_history(
+        db_path,
+        miner_ids=["miner-window"],
+        now_ts=now_ts,
+        days=2,
+    )[0]
+    fourteen_day = rustchain_monitor.compare_miner_history(
+        db_path,
+        miner_ids=["miner-window"],
+        now_ts=now_ts,
+        days=14,
+    )[0]
+
+    assert two_day["recent_gain"] == 4.0
+    assert two_day["daily_average"] == 2.0
+    assert fourteen_day["recent_gain"] == 10.0
+    assert fourteen_day["daily_average"] == 10.0 / 14
+
+
 def test_export_history_csv_writes_snapshot_rows(tmp_path):
     db_path = tmp_path / "history.db"
     csv_path = tmp_path / "export.csv"
