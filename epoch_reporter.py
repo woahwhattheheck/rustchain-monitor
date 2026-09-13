@@ -92,7 +92,7 @@ def load_state(state_file: str) -> dict:
 
 
 def save_state(state_file: str, state: dict) -> None:
-    """Save the reporter state to file."""
+    """Save the last reporter state to file."""
     with open(state_file, "w") as handle:
         json.dump(state, handle, indent=2, sort_keys=True)
 
@@ -132,6 +132,10 @@ def _record_list_or_none(value) -> list[dict] | None:
         for field in ("miner", "miner_id"):
             identity = item.get(field)
             if identity not in (None, "") and not isinstance(identity, str):
+                return None
+        for field in ("device_family", "hardware_type", "device_arch"):
+            hardware_label = item.get(field)
+            if hardware_label is not None and not isinstance(hardware_label, str):
                 return None
     return value
 
