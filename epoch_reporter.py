@@ -92,7 +92,7 @@ def load_state(state_file: str) -> dict:
 
 
 def save_state(state_file: str, state: dict) -> None:
-    """Save the last reporter state to file."""
+    """Save the reporter state to file."""
     with open(state_file, "w") as handle:
         json.dump(state, handle, indent=2, sort_keys=True)
 
