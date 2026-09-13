@@ -81,3 +81,27 @@ def test_restoration_rejects_missing_scratch_copy(tmp_path, monkeypatch):
         "Restoration test failed: Unsafe or missing restored file: rustchain.db"
     ]
     assert not list(tmp_path.glob("rustchain_restore_*"))
+
+
+def test_restoration_rejects_same_size_content_corruption(tmp_path, monkeypatch):
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "rustchain.db").write_bytes(b"database-bytes")
+
+    verifier = BackupVerifier(backup_dir)
+    original_write_bytes = Path.write_bytes
+
+    def corrupt_restored_copy(path, data):
+        if path.parent.name.startswith("rustchain_restore_") and data:
+            data = bytes([data[0] ^ 1]) + data[1:]
+        return original_write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", corrupt_restored_copy)
+
+    assert verifier.test_restoration() is False
+    assert verifier.results["restoration"] is False
+    assert any(
+        "Restored content mismatch: rustchain.db" in error
+        for error in verifier.results["errors"]
+    )
+    assert not list(tmp_path.glob("rustchain_restore_*"))
