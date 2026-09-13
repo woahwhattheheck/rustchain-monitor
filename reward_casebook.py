@@ -213,6 +213,14 @@ def compile_casebook(
             )
 
         report = artifact["report"]
+        _, last_observed_dt = _utc(
+            report["last_observed_at"],
+            f"evidence_pairs[{index}].report.last_observed_at",
+        )
+        if last_observed_dt > as_of_dt:
+            raise CasebookError(
+                f"evidence_pairs[{index}] contains observations after as_of"
+            )
         receipt = artifact["receipt"]
         evidence_key = (
             receipt["source_sha256"],
