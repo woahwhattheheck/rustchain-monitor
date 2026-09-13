@@ -205,9 +205,9 @@ def _sanitize_json_numbers(value):
 
 def _health_db_rw(health: dict) -> bool:
     if "db_rw" in health:
-        return bool(health.get("db_rw"))
-    db_value = str(health.get("db", "") or "").lower()
-    return "rw" in db_value
+        return health.get("db_rw") is True
+    db_value = str(health.get("db", "") or "").strip().lower()
+    return db_value in {"rw", "read-write", "read_write", "readwrite"}
 
 
 def record_history_snapshot(
@@ -1134,7 +1134,7 @@ class RustChainMonitor:
 
         epoch_current = epoch.get("current_epoch", epoch.get("epoch"))
         summary = {
-            "node_ok": bool(health.get("ok")),
+            "node_ok": health.get("ok") is True,
             "version": health.get("version", "unknown") or "unknown",
             "epoch_current": _coerce_int(epoch_current, None),
             "active_miners": len(miners) if isinstance(miners, list) else _coerce_int((miners or {}).get("count"), 0),
