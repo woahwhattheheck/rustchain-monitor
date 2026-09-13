@@ -774,7 +774,10 @@ def load_config(config_path: str | None) -> dict:
     if not path.exists():
         return {}
     with open(path) as handle:
-        return json.load(handle)
+        config = json.load(handle)
+    if not isinstance(config, dict):
+        raise ValueError("config root must be a JSON object")
+    return config
 
 
 def main():
@@ -797,7 +800,10 @@ def main():
     parser.add_argument("--once", action="store_true", help="Run once instead of continuous loop")
 
     args = parser.parse_args()
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        parser.error(f"invalid config: {exc}")
 
     node_url = first_non_none(args.node, os.environ.get("API_NODE"), config.get("node"), DEFAULT_NODE)
     discord_webhook = first_non_none(args.discord, os.environ.get("DISCORD_WEBHOOK_URL"), config.get("discord_webhook"))
