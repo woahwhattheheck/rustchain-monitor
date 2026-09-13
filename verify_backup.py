@@ -148,8 +148,16 @@ def get_table_info(db_path: str, table: str) -> Dict:
             )
             if amount_col:
                 # amount_col comes from a fixed whitelist confirmed present in
-                # the table, so this f-string is not user-controlled.
-                cursor.execute(f"SELECT COUNT(*) FROM balances WHERE {amount_col} > 0")
+                # the table, so this f-string is not user-controlled. Require
+                # a real SQLite numeric storage class as well as a positive
+                # value: under SQLite ordering rules malformed TEXT such as
+                # 'oops' compares greater than numeric 0 and otherwise turns
+                # corrupted balance content into a false positive.
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM balances "
+                    f"WHERE typeof({amount_col}) IN ('integer', 'real') "
+                    f"AND {amount_col} > 0"
+                )
                 info["has_positive"] = cursor.fetchone()[0] > 0
             else:
                 # An unfamiliar schema cannot prove the positive-balance
