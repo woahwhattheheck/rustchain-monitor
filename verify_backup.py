@@ -152,7 +152,10 @@ def get_table_info(db_path: str, table: str) -> Dict:
                 cursor.execute(f"SELECT COUNT(*) FROM balances WHERE {amount_col} > 0")
                 info["has_positive"] = cursor.fetchone()[0] > 0
             else:
-                info["has_positive"] = info["row_count"] > 0
+                # An unfamiliar schema cannot prove the positive-balance
+                # invariant. Preserve the default False instead of inferring
+                # positivity from row presence and turning unknown data green.
+                info["has_positive"] = False
         
         conn.close()
     except sqlite3.Error as e:
