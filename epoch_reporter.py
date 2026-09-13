@@ -44,6 +44,8 @@ DEFAULT_MOLTBOOK_URL = "https://moltbook.ai/api/v1"
 DEFAULT_OFFLINE_POLLS = 2
 DEFAULT_TIP_AGE_MAX = 100
 DEFAULT_BACKUP_AGE_MAX_HOURS = 6.0
+CHAT_DELIVERY_TARGETS = ("discord", "slack", "telegram")
+KNOWN_DELIVERY_TARGETS = frozenset((*CHAT_DELIVERY_TARGETS, "moltbook"))
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -56,7 +58,28 @@ def default_state() -> dict:
         "tracked_miners": {},
         "last_health_ok": None,
         "last_reward_alert_epoch": None,
+        "pending_delivery_targets": {},
     }
+
+
+def _normalize_pending_delivery_targets(value) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized = {}
+    for event_key, targets in value.items():
+        if not isinstance(event_key, str) or not isinstance(targets, list):
+            continue
+        valid_targets = sorted(
+            {
+                target
+                for target in targets
+                if isinstance(target, str) and target in KNOWN_DELIVERY_TARGETS
+            }
+        )
+        if valid_targets:
+            normalized[event_key] = valid_targets
+    return normalized
 
 
 def _normalize_tracked_miner_state(info) -> dict | None:
@@ -86,6 +109,10 @@ def normalize_state(state: dict | None) -> dict:
             for miner_id, info in tracked.items()
             if (normalized := _normalize_tracked_miner_state(info)) is not None
         }
+
+    merged["pending_delivery_targets"] = _normalize_pending_delivery_targets(
+        merged.get("pending_delivery_targets")
+    )
     return merged
 
 
@@ -489,6 +516,23 @@ def post_to_moltbook(api_key: str, api_url: str, message: str) -> bool:
         return False
 
 
+def _configured_chat_target_names(
+    *,
+    discord_webhook: str | None,
+    slack_webhook: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+) -> tuple[str, ...]:
+    configured = []
+    if discord_webhook:
+        configured.append("discord")
+    if slack_webhook:
+        configured.append("slack")
+    if telegram_token and telegram_chat_id:
+        configured.append("telegram")
+    return tuple(configured)
+
+
 def notify_channels(
     message: str,
     *,
@@ -496,15 +540,36 @@ def notify_channels(
     slack_webhook: str | None = None,
     telegram_token: str | None = None,
     telegram_chat_id: str | None = None,
+    delivered_targets: set[str] | None = None,
 ) -> bool:
-    delivery_results = []
-    if discord_webhook:
-        delivery_results.append(post_to_discord(discord_webhook, message))
-    if slack_webhook:
-        delivery_results.append(post_to_slack(slack_webhook, message))
-    if telegram_token and telegram_chat_id:
-        delivery_results.append(post_to_telegram(telegram_token, telegram_chat_id, message))
-    return bool(delivery_results) and all(delivery_results)
+    delivered = delivered_targets if delivered_targets is not None else set()
+    configured = _configured_chat_target_names(
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+    )
+
+    if (
+        "discord" in configured
+        and "discord" not in delivered
+        and post_to_discord(discord_webhook, message)
+    ):
+        delivered.add("discord")
+    if (
+        "slack" in configured
+        and "slack" not in delivered
+        and post_to_slack(slack_webhook, message)
+    ):
+        delivered.add("slack")
+    if (
+        "telegram" in configured
+        and "telegram" not in delivered
+        and post_to_telegram(telegram_token, telegram_chat_id, message)
+    ):
+        delivered.add("telegram")
+
+    return bool(configured) and all(target in delivered for target in configured)
 
 
 def _notification_target_configured(
@@ -515,10 +580,145 @@ def _notification_target_configured(
     telegram_chat_id: str | None,
 ) -> bool:
     return bool(
-        discord_webhook
-        or slack_webhook
-        or (telegram_token and telegram_chat_id)
+        _configured_chat_target_names(
+            discord_webhook=discord_webhook,
+            slack_webhook=slack_webhook,
+            telegram_token=telegram_token,
+            telegram_chat_id=telegram_chat_id,
+        )
     )
+
+
+def _event_delivery_key(kind: str, *parts) -> str:
+    encoded = json.dumps(parts, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return f"{kind}:{encoded}"
+
+
+def _pending_targets(
+    state: dict,
+    event_key: str,
+    *,
+    exclusive_prefix: str | None = None,
+) -> set[str]:
+    pending = state.setdefault("pending_delivery_targets", {})
+    if exclusive_prefix:
+        for stale_key in list(pending):
+            if stale_key != event_key and stale_key.startswith(exclusive_prefix):
+                pending.pop(stale_key, None)
+    return set(pending.get(event_key, []))
+
+
+def _finish_delivery_attempt(
+    state: dict,
+    event_key: str,
+    configured_targets,
+    delivered_targets: set[str],
+) -> bool:
+    configured = tuple(configured_targets)
+    complete = not configured or all(target in delivered_targets for target in configured)
+    pending = state.setdefault("pending_delivery_targets", {})
+    if complete:
+        pending.pop(event_key, None)
+    else:
+        pending[event_key] = sorted(
+            target for target in delivered_targets if target in KNOWN_DELIVERY_TARGETS
+        )
+    return complete
+
+
+def _deliver_chat_event(
+    state: dict,
+    event_key: str,
+    message: str,
+    *,
+    discord_webhook: str | None,
+    slack_webhook: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+    exclusive_prefix: str | None = None,
+) -> tuple[bool, bool]:
+    configured = _configured_chat_target_names(
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+    )
+    delivered_targets = _pending_targets(
+        state,
+        event_key,
+        exclusive_prefix=exclusive_prefix,
+    )
+    delivered = notify_channels(
+        message,
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+        delivered_targets=delivered_targets,
+    )
+    # Preserve compatibility with injected/test notification shims that return a
+    # boolean but do not mutate the delivered-target accumulator.
+    if delivered:
+        delivered_targets.update(configured)
+    complete = _finish_delivery_attempt(
+        state,
+        event_key,
+        configured,
+        delivered_targets,
+    )
+    return complete, bool(configured)
+
+
+def _deliver_epoch_event(
+    state: dict,
+    event_key: str,
+    message: str,
+    *,
+    discord_webhook: str | None,
+    slack_webhook: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+    moltbook_key: str | None,
+    moltbook_url: str,
+) -> tuple[bool, bool]:
+    chat_targets = _configured_chat_target_names(
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+    )
+    configured = (*chat_targets, *(("moltbook",) if moltbook_key else ()))
+    delivered_targets = _pending_targets(
+        state,
+        event_key,
+        exclusive_prefix="epoch:",
+    )
+
+    chat_delivered = notify_channels(
+        message,
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+        delivered_targets=delivered_targets,
+    )
+    if chat_delivered:
+        delivered_targets.update(chat_targets)
+
+    if (
+        moltbook_key
+        and "moltbook" not in delivered_targets
+        and post_to_moltbook(moltbook_key, moltbook_url, message)
+    ):
+        delivered_targets.add("moltbook")
+
+    complete = _finish_delivery_attempt(
+        state,
+        event_key,
+        configured,
+        delivered_targets,
+    )
+    return complete, bool(configured)
 
 
 def update_health_state(
@@ -676,13 +876,6 @@ def run_once(
     health_data = fetch_health(node_url)
     epoch_data = _mapping_payload_or_none(fetch_epoch(node_url))
     miners = _record_list_or_none(fetch_miners(node_url))
-    alert_target_configured = _notification_target_configured(
-        discord_webhook=discord_webhook,
-        slack_webhook=slack_webhook,
-        telegram_token=telegram_token,
-        telegram_chat_id=telegram_chat_id,
-    )
-
     health_messages = update_health_state(
         state,
         health_data,
@@ -692,20 +885,33 @@ def run_once(
         acknowledge=False,
     )
     for message in health_messages:
-        delivered = notify_channels(
+        is_healthy = not health_problems(
+            health_data,
+            tip_age_max=tip_age_max,
+            backup_age_max_hours=backup_age_max_hours,
+        )
+        event_key = _event_delivery_key(
+            "health",
+            "recovered" if is_healthy else "alert",
+        )
+        opposite_key = _event_delivery_key(
+            "health",
+            "alert" if is_healthy else "recovered",
+        )
+        state["pending_delivery_targets"].pop(opposite_key, None)
+        delivery_complete, target_configured = _deliver_chat_event(
+            state,
+            event_key,
             message,
             discord_webhook=discord_webhook,
             slack_webhook=slack_webhook,
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
+            exclusive_prefix="health:",
         )
-        if delivered or not alert_target_configured:
-            state["last_health_ok"] = not health_problems(
-                health_data,
-                tip_age_max=tip_age_max,
-                backup_age_max_hours=backup_age_max_hours,
-            )
-        status = "sent" if delivered else "suppressed"
+        if delivery_complete:
+            state["last_health_ok"] = is_healthy
+        status = "sent" if delivery_complete and target_configured else "suppressed"
         print(f"Alert {status}: {message.splitlines()[0]}")
 
     miner_events = _update_miner_tracking_events(
@@ -716,18 +922,32 @@ def run_once(
     )
     for event in miner_events:
         message = event["message"]
-        delivered = notify_channels(
+        event_key = _event_delivery_key(
+            "miner",
+            event["miner_id"],
+            event["kind"],
+        )
+        opposite_kind = "recovery" if event["kind"] == "offline" else "offline"
+        opposite_key = _event_delivery_key(
+            "miner",
+            event["miner_id"],
+            opposite_kind,
+        )
+        state["pending_delivery_targets"].pop(opposite_key, None)
+        delivery_complete, target_configured = _deliver_chat_event(
+            state,
+            event_key,
             message,
             discord_webhook=discord_webhook,
             slack_webhook=slack_webhook,
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
         )
-        if delivered or not alert_target_configured:
+        if delivery_complete:
             miner_state = state["tracked_miners"].get(event["miner_id"])
             if miner_state is not None:
                 miner_state["offline_alerted"] = event["kind"] == "offline"
-        status = "sent" if delivered else "suppressed"
+        status = "sent" if delivery_complete and target_configured else "suppressed"
         print(f"Alert {status}: {message.splitlines()[0]}")
 
     reward_message = check_reward_alert(
@@ -738,42 +958,42 @@ def run_once(
         acknowledge=False,
     )
     if reward_message:
-        delivered = notify_channels(
+        reward_epoch = epoch_data.get("epoch") if epoch_data else None
+        event_key = _event_delivery_key("reward", reward_epoch)
+        delivery_complete, target_configured = _deliver_chat_event(
+            state,
+            event_key,
             reward_message,
             discord_webhook=discord_webhook,
             slack_webhook=slack_webhook,
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
+            exclusive_prefix="reward:",
         )
-        if delivered or not alert_target_configured:
-            state["last_reward_alert_epoch"] = epoch_data.get("epoch") if epoch_data else None
-        status = "sent" if delivered else "suppressed"
+        if delivery_complete:
+            state["last_reward_alert_epoch"] = reward_epoch
+        status = "sent" if delivery_complete and target_configured else "suppressed"
         print(f"Alert {status}: {reward_message.splitlines()[0]}")
 
     if epoch_data:
         current_epoch = epoch_data.get("epoch")
         if current_epoch is not None and current_epoch != state.get("last_epoch"):
             epoch_message = format_epoch_message(epoch_data, miners or [], node_url)
-            channel_delivered = notify_channels(
+            event_key = _event_delivery_key("epoch", current_epoch)
+            delivery_complete, target_configured = _deliver_epoch_event(
+                state,
+                event_key,
                 epoch_message,
                 discord_webhook=discord_webhook,
                 slack_webhook=slack_webhook,
                 telegram_token=telegram_token,
                 telegram_chat_id=telegram_chat_id,
-            )
-            moltbook_delivered = (
-                post_to_moltbook(moltbook_key, moltbook_url, epoch_message)
-                if moltbook_key
-                else False
-            )
-            epoch_target_configured = alert_target_configured or bool(moltbook_key)
-            delivery_complete = (
-                (channel_delivered or not alert_target_configured)
-                and (moltbook_delivered or not moltbook_key)
+                moltbook_key=moltbook_key,
+                moltbook_url=moltbook_url,
             )
             if delivery_complete:
                 state["last_epoch"] = current_epoch
-                if epoch_target_configured:
+                if target_configured:
                     state["last_posted"] = now_iso()
             print(f"Observed new epoch {current_epoch}")
 
