@@ -19,6 +19,7 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import sys
 import sqlite3
 import time
@@ -146,9 +147,10 @@ def _coerce_float(value, default: Optional[float] = 0.0) -> Optional[float]:
     if value is None or value == "":
         return default
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        coerced = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return coerced if math.isfinite(coerced) else default
 
 
 def _coerce_int(value, default: Optional[int] = 0) -> Optional[int]:
@@ -156,8 +158,21 @@ def _coerce_int(value, default: Optional[int] = 0) -> Optional[int]:
         return default
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _sanitize_json_numbers(value):
+    """Replace non-finite floats with JSON-safe nulls in exported diagnostics."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _sanitize_json_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_numbers(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json_numbers(item) for item in value]
+    return value
 
 
 def _health_db_rw(health: dict) -> bool:
@@ -178,7 +193,14 @@ def record_history_snapshot(
     observed_at: Optional[float] = None,
 ) -> bool:
     """Persist a miner balance snapshot unless it duplicates the latest point."""
-    observed_at = time.time() if observed_at is None else observed_at
+    balance_value = _coerce_float(balance_rtc, None)
+    if balance_value is None:
+        raise ValueError("balance_rtc must be a finite number")
+
+    observed_at_value = time.time() if observed_at is None else _coerce_float(observed_at, None)
+    if observed_at_value is None:
+        raise ValueError("observed_at must be a finite number")
+
     with _history_connection(db_path) as conn:
         last = conn.execute(
             """
@@ -192,14 +214,17 @@ def record_history_snapshot(
         ).fetchone()
 
         if last:
+            last_balance = _coerce_float(last["balance_rtc"], None)
+            if last_balance is None:
+                raise ValueError("stored balance_rtc must be a finite number")
             if (
                 last["epoch"] == epoch
-                and abs(float(last["balance_rtc"]) - float(balance_rtc)) < 1e-12
+                and abs(last_balance - balance_value) < 1e-12
                 and int(last["is_active"] or 0) == int(bool(is_active))
                 and (last["device_arch"] or "") == (device_arch or "")
             ):
                 return False
-            delta_rtc = float(balance_rtc) - float(last["balance_rtc"])
+            delta_rtc = balance_value - last_balance
         else:
             delta_rtc = 0.0
 
@@ -211,10 +236,10 @@ def record_history_snapshot(
             """,
             (
                 miner_id,
-                float(observed_at),
+                observed_at_value,
                 epoch,
-                float(balance_rtc),
-                float(delta_rtc),
+                balance_value,
+                delta_rtc,
                 device_arch or "",
                 1 if is_active else 0,
             ),
@@ -462,7 +487,7 @@ def list_recorded_miners(db_path: str | Path) -> list[str]:
             SELECT DISTINCT miner_id
             FROM miner_history
             ORDER BY miner_id ASC
-            """
+            """,
         ).fetchall()
     return [str(row[0]) for row in rows]
 
@@ -501,6 +526,8 @@ def _append_metric(metrics: list[dict], name: str, value, labels: Optional[dict]
         return
     if isinstance(value, bool):
         value = 1 if value else 0
+    if isinstance(value, float) and not math.isfinite(value):
+        return
     metrics.append({"name": name, "value": value, "labels": labels or {}})
 
 
@@ -769,16 +796,18 @@ def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]]
     if history_table:
         tables.append(history_table)
 
-    return {
-        "generated_at": snapshot["generated_at"],
-        "generated_at_ts": snapshot["generated_at_ts"],
-        "node_url": snapshot["node_url"],
-        "datasource_format": "grafana-simple-json-timeseries",
-        "series": _grafana_series(metrics, ts_ms),
-        "tables": tables,
-        "snapshot": snapshot,
-        "history_summaries": history_summaries or [],
-    }
+    return _sanitize_json_numbers(
+        {
+            "generated_at": snapshot["generated_at"],
+            "generated_at_ts": snapshot["generated_at_ts"],
+            "node_url": snapshot["node_url"],
+            "datasource_format": "grafana-simple-json-timeseries",
+            "series": _grafana_series(metrics, ts_ms),
+            "tables": tables,
+            "snapshot": snapshot,
+            "history_summaries": history_summaries or [],
+        }
+    )
 
 
 def build_multi_node_grafana_export(snapshots: list[dict], history_summaries: Optional[list[dict]] = None) -> dict:
@@ -847,16 +876,18 @@ def build_multi_node_grafana_export(snapshots: list[dict], history_summaries: Op
     if history_table:
         tables.append(history_table)
 
-    return {
-        "generated_at": generated_at,
-        "generated_at_ts": generated_at_ts,
-        "node_urls": [snapshot.get("node_url") for snapshot in snapshots],
-        "datasource_format": "grafana-simple-json-timeseries",
-        "series": _grafana_series(metrics, ts_ms),
-        "tables": tables,
-        "snapshots": snapshots,
-        "history_summaries": history_summaries or [],
-    }
+    return _sanitize_json_numbers(
+        {
+            "generated_at": generated_at,
+            "generated_at_ts": generated_at_ts,
+            "node_urls": [snapshot.get("node_url") for snapshot in snapshots],
+            "datasource_format": "grafana-simple-json-timeseries",
+            "series": _grafana_series(metrics, ts_ms),
+            "tables": tables,
+            "snapshots": snapshots,
+            "history_summaries": history_summaries or [],
+        }
+    )
 
 
 def export_grafana_json(
@@ -1045,7 +1076,10 @@ class RustChainMonitor:
         """Get specific miner's RTC balance"""
         response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
         response.raise_for_status()
-        return response.json().get("balance_rtc", 0.0)
+        balance = _coerce_float(response.json().get("balance_rtc", 0.0), None)
+        if balance is None:
+            raise ValueError("balance_rtc must be a finite number")
+        return balance
 
     def collect_network_snapshot(self) -> dict:
         """Collect a single network snapshot for export surfaces."""
@@ -1112,10 +1146,10 @@ class RustChainMonitor:
                 our_miner = miner
                 break
 
-        current_epoch = epoch_data.get("current_epoch", epoch_data.get("epoch"))
+        current_epoch = _coerce_int(epoch_data.get("current_epoch", epoch_data.get("epoch")), None)
         device_arch = (our_miner or {}).get("device_arch", "unknown")
-        last_attest = (our_miner or {}).get("last_attestation_time", 0) or 0
-        is_active = bool(our_miner) and (time.time() - float(last_attest)) < 3600
+        last_attest = _coerce_float((our_miner or {}).get("last_attestation_time", 0), None)
+        is_active = bool(our_miner) and last_attest is not None and (time.time() - last_attest) < 3600
         return {
             "epoch": current_epoch,
             "balance_rtc": balance,
@@ -1129,7 +1163,7 @@ class RustChainMonitor:
             self.history_db_path,
             miner_id=miner_id,
             epoch=snapshot.get("epoch"),
-            balance_rtc=float(snapshot.get("balance_rtc", 0.0)),
+            balance_rtc=snapshot.get("balance_rtc", 0.0),
             device_arch=snapshot.get("device_arch", "unknown"),
             is_active=bool(snapshot.get("is_active")),
         )
