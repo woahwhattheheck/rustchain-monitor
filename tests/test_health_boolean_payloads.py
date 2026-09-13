@@ -34,6 +34,27 @@ def test_health_ok_requires_literal_json_boolean_true(value):
 
 
 @pytest.mark.parametrize("value", MALFORMED_TRUTHY)
+def test_network_summary_requires_literal_json_boolean_true(value, capsys):
+    monitor = _monitor_with_health({"ok": value})
+
+    monitor.network_summary()
+
+    output = capsys.readouterr().out
+    assert "❌ Down" in output
+    assert "✅ Healthy" not in output
+
+
+def test_network_summary_protocol_boolean_true_remains_healthy(capsys):
+    monitor = _monitor_with_health({"ok": True})
+
+    monitor.network_summary()
+
+    output = capsys.readouterr().out
+    assert "✅ Healthy" in output
+    assert "❌ Down" not in output
+
+
+@pytest.mark.parametrize("value", MALFORMED_TRUTHY)
 def test_db_rw_requires_literal_json_boolean_true(value):
     assert _health_db_rw({"db_rw": value}) is False
 

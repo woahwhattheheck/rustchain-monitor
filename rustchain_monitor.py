@@ -1437,7 +1437,7 @@ class RustChainMonitor:
         epoch = self.get_epoch()
         miners = self.get_miners()
         
-        is_healthy = health.get('ok', False)
+        is_healthy = health.get('ok') is True
         node_status = self._status("✅ Healthy") if is_healthy else self._error("❌ Down")
         
         print(f"{self._accent('╔' + '═' * 44 + '╗')}")
