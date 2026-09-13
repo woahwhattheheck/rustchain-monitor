@@ -182,20 +182,23 @@ def verify_tables(backup_db: str, live_db: Optional[str]) -> Tuple[bool, List[st
         
         row_count = info["row_count"]
         live_count = live_counts.get(table, 0)
+        passed = True
         
         # Build status line
         status_parts = [f"{row_count} rows"]
         if live_count > 0:
             status_parts.append(f"live: {live_count}")
             
-            # Check if backup is too far behind
-            if live_count > 0:
-                diff_percent = abs(live_count - row_count) / live_count * 100
-                if diff_percent > MAX_ROW_DIFF_PERCENT:
-                    status_parts.append(f"⚠️ {diff_percent:.1f}% diff")
+            # A backup that differs from the live table by more than the
+            # documented maximum tolerance is not current enough to verify.
+            # Keep the percentage in the report, but fail the table rather
+            # than emitting a warning while returning an overall PASS.
+            diff_percent = abs(live_count - row_count) / live_count * 100
+            if diff_percent > MAX_ROW_DIFF_PERCENT:
+                status_parts.append(f"⚠️ {diff_percent:.1f}% diff")
+                passed = False
         
         # Check requirements
-        passed = True
         if requirements["min_rows"] > 0 and row_count < requirements["min_rows"]:
             passed = False
         if requirements["check_positive"] and not info.get("has_positive", False):
