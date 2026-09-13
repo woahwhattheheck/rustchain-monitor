@@ -161,7 +161,7 @@ def test_verify_tables_fails_missing_tables_and_empty_required_rows(tmp_path):
     assert any("balances: 1 rows" in result for result in results)
 
 
-def test_verify_tables_flags_large_live_row_count_difference(tmp_path):
+def test_verify_tables_fails_large_live_row_count_difference(tmp_path):
     backup_db = tmp_path / "backup.db"
     live_db = tmp_path / "live.db"
     _create_required_schema(backup_db, headers_rows=1)
@@ -169,6 +169,19 @@ def test_verify_tables_flags_large_live_row_count_difference(tmp_path):
 
     passed, results = verify_backup.verify_tables(str(backup_db), str(live_db))
 
-    assert passed is True
+    assert passed is False
     assert any("headers: 1 rows (live: 20" in result for result in results)
-    assert any("95.0% diff" in result for result in results)
+    assert any("95.0% diff" in result and result.endswith("❌") for result in results)
+
+
+def test_verify_tables_allows_exact_live_row_count_tolerance(tmp_path):
+    backup_db = tmp_path / "backup.db"
+    live_db = tmp_path / "live.db"
+    _create_required_schema(backup_db, headers_rows=18)
+    _create_required_schema(live_db, headers_rows=20)
+
+    passed, results = verify_backup.verify_tables(str(backup_db), str(live_db))
+
+    assert passed is True
+    assert any("headers: 18 rows (live: 20" in result for result in results)
+    assert not any("10.0% diff" in result for result in results)
