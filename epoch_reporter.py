@@ -146,7 +146,7 @@ def _float_or_none(value):
             return None
         parsed = float(value)
         return parsed if math.isfinite(parsed) else None
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
