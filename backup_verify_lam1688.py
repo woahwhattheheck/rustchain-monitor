@@ -50,6 +50,11 @@ class BackupVerifier:
         
         for filename in required_files:
             filepath = self.backup_path / filename
+            if filepath.is_symlink():
+                error = f"Unsafe symbolic link: {filename}"
+                self.results["errors"].append(error)
+                print(f"✗ {filename}: SYMBOLIC LINK")
+                continue
             if filepath.exists():
                 checksum = self.calculate_checksum(filepath)
                 self.results["checksums"][filename] = checksum
@@ -114,8 +119,12 @@ class BackupVerifier:
             ) as temp_name:
                 temp_dir = Path(temp_name)
 
-                # Copy files to temp for restoration test
+                # Copy files to temp for restoration test. Do not follow links:
+                # a verification rehearsal must exercise bytes owned by the
+                # backup directory, not a live/external target reachable by it.
                 for file in self.backup_path.glob("*"):
+                    if file.is_symlink():
+                        raise ValueError(f"refusing symbolic link in backup: {file.name}")
                     if file.is_file():
                         dest = temp_dir / file.name
                         dest.write_bytes(file.read_bytes())
