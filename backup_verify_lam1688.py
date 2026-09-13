@@ -146,12 +146,18 @@ class BackupVerifier:
                     dest.write_bytes(file.read_bytes())
                     print(f"✓ Restored {file.name} to test location")
                 
-                # Verify restored files
+                # Verify every restored copy remains an ordinary file and
+                # exactly matches the source size. Missing or truncated copies
+                # must fail the restoration check rather than silently pass.
                 for file in temp_dir.glob("*"):
                     original = self.backup_path / file.name
-                    if file.exists() and original.exists():
-                        if file.stat().st_size == original.stat().st_size:
-                            print(f"✓ {file.name} restoration verified")
+                    if not _is_single_link_regular_file(file):
+                        raise ValueError(f"Unsafe restored file: {file.name}")
+                    if not _is_single_link_regular_file(original):
+                        raise ValueError(f"Unsafe or missing source during restoration verification: {file.name}")
+                    if file.stat().st_size != original.stat().st_size:
+                        raise ValueError(f"Restoration size mismatch: {file.name}")
+                    print(f"✓ {file.name} restoration verified")
                 
             return True
         except Exception as e:
