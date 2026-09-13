@@ -201,7 +201,7 @@ def test_notify_channels_requires_every_configured_chat_target(monkeypatch):
     assert attempts == ["discord", "slack", "telegram"]
 
 
-def test_epoch_retries_until_chat_and_moltbook_are_both_delivered(monkeypatch):
+def test_epoch_retries_failed_chat_without_reposting_successful_moltbook(monkeypatch):
     channel_outcomes = iter([False, True])
     moltbook_attempts = []
     monkeypatch.setattr(epoch_reporter, "fetch_health", lambda _url: _healthy())
@@ -230,6 +230,7 @@ def test_epoch_retries_until_chat_and_moltbook_are_both_delivered(monkeypatch):
     )
     assert state["last_epoch"] is None
     assert state["last_posted"] is None
+    assert list(state["pending_delivery_targets"].values()) == [["moltbook"]]
 
     state = epoch_reporter.run_once(
         "https://node.example",
@@ -239,5 +240,6 @@ def test_epoch_retries_until_chat_and_moltbook_are_both_delivered(monkeypatch):
     )
     assert state["last_epoch"] == 42
     assert state["last_posted"] is not None
-    assert len(moltbook_attempts) == 2
+    assert len(moltbook_attempts) == 1
     assert all("Epoch 42 settled" in message for message in moltbook_attempts)
+    assert state["pending_delivery_targets"] == {}
