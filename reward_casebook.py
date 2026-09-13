@@ -510,7 +510,7 @@ def load_manifest(path: str | Path) -> tuple[
     return pairs, dispositions, as_of
 
 
-def _write_new(path: str | Path, text: str) -> None:
+def _write_new(path: str | Path, text: str) -> Path:
     target = Path(path)
     try:
         with open(target, "x", encoding="utf-8") as handle:
@@ -518,6 +518,34 @@ def _write_new(path: str | Path, text: str) -> None:
             handle.flush()
     except FileExistsError as exc:
         raise CasebookError(f"refusing to overwrite existing file: {target}") from exc
+    return target
+
+
+def _write_outputs(
+    json_path: str | Path,
+    json_text: str,
+    markdown_path: str | Path,
+    markdown_text: str,
+) -> None:
+    json_target = Path(json_path)
+    markdown_target = Path(markdown_path)
+    if json_target.absolute() == markdown_target.absolute():
+        raise CasebookError("JSON and Markdown outputs must be different files")
+    for target in (json_target, markdown_target):
+        if target.exists() or target.is_symlink():
+            raise CasebookError(f"refusing to overwrite existing file: {target}")
+
+    created: list[Path] = []
+    try:
+        created.append(_write_new(json_target, json_text))
+        created.append(_write_new(markdown_target, markdown_text))
+    except Exception:
+        for target in reversed(created):
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -545,8 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dispositions=dispositions,
                 as_of=as_of,
             )
-            _write_new(
-                args.json_out,
+            json_text = (
                 json.dumps(
                     artifact,
                     sort_keys=True,
@@ -554,9 +581,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ensure_ascii=False,
                     allow_nan=False,
                 )
-                + "\n",
+                + "\n"
             )
-            _write_new(args.markdown_out, artifact["markdown"])
+            _write_outputs(
+                args.json_out,
+                json_text,
+                args.markdown_out,
+                artifact["markdown"],
+            )
             return 0
         candidate = load_json_strict(args.artifact)
         ok = verify_casebook(
