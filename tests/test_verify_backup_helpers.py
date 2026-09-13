@@ -96,6 +96,27 @@ def test_get_table_info_detects_positive_balances_with_amount_i64_column(tmp_pat
     assert info == {"exists": True, "row_count": 2, "has_positive": False}
 
 
+def test_verify_tables_fails_closed_for_unknown_balance_amount_column(tmp_path):
+    db = tmp_path / "unknown_balance_schema.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE balances (credits INTEGER)")
+    conn.execute("CREATE TABLE miner_attest_recent (id INTEGER)")
+    conn.execute("CREATE TABLE headers (id INTEGER)")
+    conn.execute("CREATE TABLE ledger (id INTEGER)")
+    conn.execute("CREATE TABLE epoch_rewards (id INTEGER)")
+    conn.execute("INSERT INTO balances (credits) VALUES (100)")
+    conn.execute("INSERT INTO headers (id) VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    info = verify_backup.get_table_info(str(db), "balances")
+    passed, results = verify_backup.verify_tables(str(db), None)
+
+    assert info == {"exists": True, "row_count": 1, "has_positive": False}
+    assert passed is False
+    assert any("balances: 1 rows" in result and "❌" in result for result in results)
+
+
 def test_get_table_info_rejects_all_zero_balances(tmp_path):
     # Regression: canonical schema is balances(amount). A backup whose balances
     # are all zero (or negative) must report has_positive=False, otherwise
