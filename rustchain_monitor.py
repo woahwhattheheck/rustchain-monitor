@@ -99,6 +99,13 @@ def normalize_node_target(raw_target: dict, *, index: int = 0) -> dict:
     if not isinstance(raw_target, dict):
         raise ValueError(f"node target {index + 1} must be an object")
 
+    for field in ("url", "name", "node_name", "role", "node_role", "node_id"):
+        value = raw_target.get(field)
+        if value is not None and type(value) is not str:
+            raise ValueError(
+                f"node target {index + 1} field '{field}' must be a string"
+            )
+
     url = str(raw_target.get("url") or "").strip().rstrip("/")
     if not url:
         raise ValueError("node target url is required")
