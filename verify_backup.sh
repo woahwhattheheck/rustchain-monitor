@@ -81,12 +81,32 @@ main() {
     for table in "${REQUIRED_TABLES[@]}"; do
         local backup_count live_count
         
-        # Get row count from backup
-        backup_count=$(sqlite3 "$test_db" "SELECT COUNT(*) FROM $table;" 2>/dev/null || echo "0")
+        # Required backup tables must be queryable and non-empty. Do not turn
+        # query failures into a zero row count: a missing/corrupt table is a
+        # failed backup even when the live side is also unavailable or empty.
+        if ! backup_count=$(sqlite3 "$test_db" "SELECT COUNT(*) FROM $table;" 2>/dev/null); then
+            log "$table: ❌ (missing or unreadable in backup)"
+            all_passed=false
+            continue
+        fi
+        if [[ ! "$backup_count" =~ ^[0-9]+$ ]] || [[ "$backup_count" -le 0 ]]; then
+            log "$table: ${backup_count:-invalid} rows ❌ (empty or invalid!)"
+            all_passed=false
+            continue
+        fi
         
-        # Get row count from live DB (if available)
+        # Get row count from live DB (if available). Live comparison is
+        # advisory; failure to query the live DB must not disguise backup
+        # validity, nor should it make an otherwise valid backup fail.
         if [[ -f "$LIVE_DB" ]]; then
-            live_count=$(sqlite3 "$LIVE_DB" "SELECT COUNT(*) FROM $table;" 2>/dev/null || echo "0")
+            if ! live_count=$(sqlite3 "$LIVE_DB" "SELECT COUNT(*) FROM $table;" 2>/dev/null); then
+                log "$table: $backup_count rows ✅ (live comparison unavailable)"
+                continue
+            fi
+            if [[ ! "$live_count" =~ ^[0-9]+$ ]]; then
+                log "$table: $backup_count rows ✅ (live count invalid; comparison unavailable)"
+                continue
+            fi
             
             # Allow up to 1 epoch behind (~600 seconds of data = ~10 blocks)
             local max_diff=20
@@ -102,13 +122,7 @@ main() {
                 log "$table: $backup_count rows (live: $live_count) ⚠️ (>$max_diff behind)"
             fi
         else
-            # No live DB to compare, just check backup has data
-            if [[ "$backup_count" -gt 0 ]]; then
-                log "$table: $backup_count rows ✅"
-            else
-                log "$table: $backup_count rows ❌ (empty!)"
-                all_passed=false
-            fi
+            log "$table: $backup_count rows ✅"
         fi
     done
     
