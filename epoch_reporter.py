@@ -182,7 +182,9 @@ def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -
         hardware_counts[hw] = hardware_counts.get(hw, 0) + 1
 
     hw_parts = [f"{hw}: {count}" for hw, count in sorted(hardware_counts.items(), key=lambda item: (-item[1], item[0]))]
-    total_rtc = float(reward) * enrolled if isinstance(reward, (int, float)) else "N/A"
+    reward_value = _float_or_none(reward)
+    enrolled_value = _float_or_none(enrolled)
+    total_rtc = reward_value * enrolled_value if reward_value is not None and enrolled_value is not None else "N/A"
 
     message = [
         f"Epoch {epoch} settled",
