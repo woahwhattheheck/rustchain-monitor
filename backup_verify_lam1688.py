@@ -53,6 +53,9 @@ class BackupVerifier:
             if filepath.exists():
                 checksum = self.calculate_checksum(filepath)
                 self.results["checksums"][filename] = checksum
+                if checksum is None:
+                    print(f"✗ {filename}: CHECKSUM FAILED")
+                    continue
                 print(f"✓ {filename}: {checksum[:16]}...")
             else:
                 self.results["errors"].append(f"Missing file: {filename}")
