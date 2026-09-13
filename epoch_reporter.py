@@ -126,8 +126,13 @@ def _mapping_payload_or_none(value) -> dict | None:
 def _record_list_or_none(value) -> list[dict] | None:
     if not isinstance(value, list):
         return None
-    if any(not isinstance(item, dict) for item in value):
-        return None
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        for field in ("miner", "miner_id", "device_family", "hardware_type", "device_arch"):
+            field_value = item.get(field)
+            if field_value is not None and not isinstance(field_value, str):
+                return None
     return value
 
 
