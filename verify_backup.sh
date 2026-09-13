@@ -31,10 +31,12 @@ trap cleanup EXIT
 
 # Find latest backup
 find_latest_backup() {
-    local pattern="$BACKUP_DIR"/rustchain_v2*.db.bak
     local latest
     
-    latest=$(ls -1t "$pattern" 2>/dev/null | head -1) || true
+    # Keep the wildcard outside quotes so Bash expands the preferred
+    # RustChain backup pattern before ls sees it. Storing the glob in a
+    # quoted variable makes the '*' literal and silently skips this tier.
+    latest=$(ls -1t "$BACKUP_DIR"/rustchain_v2*.db.bak 2>/dev/null | head -1) || true
     
     if [[ -z "$latest" ]]; then
         # Try alternative patterns
