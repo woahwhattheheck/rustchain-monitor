@@ -1,0 +1,21 @@
+{
+  "schema_version": "rustchain.reward-observations/v1",
+  "miner_id": "vintage-g4-mac",
+  "observations": [
+    {
+      "observed_at": "2026-09-13T09:00:00Z",
+      "epoch": 1847,
+      "balance_rtc": "45.782500"
+    },
+    {
+      "observed_at": "2026-09-13T09:10:00Z",
+      "epoch": 1848,
+      "balance_rtc": "46.157500"
+    },
+    {
+      "observed_at": "2026-09-13T09:30:00Z",
+      "epoch": 1850,
+      "balance_rtc": "46.532500"
+    }
+  ]
+}
