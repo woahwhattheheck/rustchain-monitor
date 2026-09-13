@@ -66,6 +66,7 @@ class BackupVerifier:
     def verify_database_integrity(self):
         """Verify SQLite database integrity"""
         db_file = self.backup_path / "rustchain.db"
+        self.results["integrity"] = False
         if not db_file.exists():
             return False
         
