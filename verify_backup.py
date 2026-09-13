@@ -55,29 +55,27 @@ def log(message: str, level: str = "INFO") -> None:
 
 
 def find_latest_backup(backup_dir: str) -> Optional[str]:
-    """Find the most recent backup file in the backup directory."""
+    """Find the most recent backup from the first matching preferred pattern."""
     backup_path = Path(backup_dir)
     
     if not backup_path.exists():
         log(f"Backup directory not found: {backup_dir}", "ERROR")
         return None
     
-    # Try each pattern
-    all_backups: List[Path] = []
+    # Patterns are ordered by preference. Pick the newest file from the first
+    # tier that has matches rather than letting a newer generic fallback hide a
+    # valid RustChain-specific backup.
     for pattern in BACKUP_PATTERNS:
         matches = list(backup_path.glob(pattern))
-        all_backups.extend(matches)
+        if not matches:
+            continue
+        matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        latest = matches[0]
+        log(f"Found {len(matches)} backup(s) matching {pattern}, latest: {latest.name}")
+        return str(latest)
     
-    if not all_backups:
-        log(f"No backup files found in {backup_dir}", "ERROR")
-        return None
-    
-    # Sort by modification time, newest first
-    all_backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    latest = all_backups[0]
-    
-    log(f"Found {len(all_backups)} backup(s), latest: {latest.name}")
-    return str(latest)
+    log(f"No backup files found in {backup_dir}", "ERROR")
+    return None
 
 
 def copy_to_temp(backup_path: str) -> Tuple[str, tempfile.TemporaryDirectory]:
