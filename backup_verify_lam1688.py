@@ -196,8 +196,9 @@ def main():
     args = parser.parse_args()
     
     verifier = BackupVerifier(args.backup_path, args.node_url)
-    verifier.run()
+    results = verifier.run()
+    return 1 if results["errors"] or not results["integrity"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
