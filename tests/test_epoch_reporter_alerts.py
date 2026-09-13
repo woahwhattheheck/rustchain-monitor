@@ -140,3 +140,89 @@ def test_run_once_posts_epoch_summary_and_alerts(monkeypatch):
     assert len(sent_messages) == 1
     assert "Epoch 123 settled" in sent_messages[0]
     assert len(moltbook_posts) == 1
+
+
+def test_run_once_retries_epoch_summary_until_configured_delivery_succeeds(monkeypatch):
+    attempts = []
+    outcomes = iter([False, True])
+
+    monkeypatch.setattr(
+        epoch_reporter,
+        "fetch_health",
+        lambda node_url: {
+            "ok": True,
+            "db_rw": True,
+            "tip_age_slots": 0,
+            "backup_age_hours": 1.0,
+        },
+    )
+    monkeypatch.setattr(epoch_reporter, "fetch_epoch", lambda node_url: {"epoch": 321, "epoch_pot": 1.5})
+    monkeypatch.setattr(epoch_reporter, "fetch_miners", lambda node_url: [])
+    monkeypatch.setattr(
+        epoch_reporter,
+        "notify_channels",
+        lambda message, **kwargs: attempts.append(message) or next(outcomes),
+    )
+
+    state = epoch_reporter.run_once(
+        "https://node.example",
+        epoch_reporter.default_state(),
+        slack_webhook="configured",
+    )
+    assert state["last_epoch"] is None
+    assert state["last_posted"] is None
+
+    state = epoch_reporter.run_once(
+        "https://node.example",
+        state,
+        slack_webhook="configured",
+    )
+    assert state["last_epoch"] == 321
+    assert state["last_posted"] is not None
+    assert len(attempts) == 2
+    assert all("Epoch 321 settled" in message for message in attempts)
+
+
+def test_run_once_retries_reward_alert_until_configured_delivery_succeeds(monkeypatch):
+    attempts = []
+    outcomes = iter([False, True])
+
+    monkeypatch.setattr(
+        epoch_reporter,
+        "fetch_health",
+        lambda node_url: {
+            "ok": True,
+            "db_rw": True,
+            "tip_age_slots": 0,
+            "backup_age_hours": 1.0,
+        },
+    )
+    monkeypatch.setattr(epoch_reporter, "fetch_epoch", lambda node_url: {"epoch": 99, "epoch_pot": 2.5})
+    monkeypatch.setattr(epoch_reporter, "fetch_miners", lambda node_url: [])
+    monkeypatch.setattr(
+        epoch_reporter,
+        "notify_channels",
+        lambda message, **kwargs: attempts.append(message) or next(outcomes),
+    )
+
+    state = epoch_reporter.default_state()
+    state["last_epoch"] = 99
+    state = epoch_reporter.run_once(
+        "https://node.example",
+        state,
+        slack_webhook="configured",
+        reward_min=1.0,
+        reward_max=2.0,
+    )
+    assert state["last_reward_alert_epoch"] is None
+
+    state = epoch_reporter.run_once(
+        "https://node.example",
+        state,
+        slack_webhook="configured",
+        reward_min=1.0,
+        reward_max=2.0,
+    )
+    assert state["last_reward_alert_epoch"] == 99
+    assert len(attempts) == 2
+    assert all("Unexpected reward alert" in message for message in attempts)

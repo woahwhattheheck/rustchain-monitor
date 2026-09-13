@@ -322,6 +322,20 @@ def notify_channels(
     return delivered
 
 
+def _notification_target_configured(
+    *,
+    discord_webhook: str | None,
+    slack_webhook: str | None,
+    telegram_token: str | None,
+    telegram_chat_id: str | None,
+) -> bool:
+    return bool(
+        discord_webhook
+        or slack_webhook
+        or (telegram_token and telegram_chat_id)
+    )
+
+
 def update_health_state(
     state: dict,
     health_data: dict | None,
@@ -329,6 +343,7 @@ def update_health_state(
     node_url: str,
     tip_age_max: int,
     backup_age_max_hours: float,
+    acknowledge: bool = True,
 ) -> list[str]:
     problems = health_problems(
         health_data,
@@ -344,16 +359,23 @@ def update_health_state(
     elif is_healthy and last_health_ok is False:
         messages.append(format_health_alert(node_url, [], health_data, recovered=True))
 
-    state["last_health_ok"] = is_healthy
+    if acknowledge or not messages:
+        state["last_health_ok"] = is_healthy
     return messages
 
 
-def update_miner_tracking(state: dict, miners: list[dict] | None, *, offline_polls: int) -> list[str]:
+def _update_miner_tracking_events(
+    state: dict,
+    miners: list[dict] | None,
+    *,
+    offline_polls: int,
+    acknowledge: bool,
+) -> list[dict]:
     if miners is None:
         return []
 
     tracked = state.setdefault("tracked_miners", {})
-    messages = []
+    events = []
     active_miners = {}
 
     for miner in miners:
@@ -362,13 +384,20 @@ def update_miner_tracking(state: dict, miners: list[dict] | None, *, offline_pol
             continue
         active_miners[miner_id] = miner
         existing = tracked.get(miner_id, {})
-        if existing.get("offline_alerted"):
-            messages.append(format_recovery_alert(miner_id, miner))
+        was_offline_alerted = bool(existing.get("offline_alerted"))
+        if was_offline_alerted:
+            events.append(
+                {
+                    "kind": "recovery",
+                    "miner_id": miner_id,
+                    "message": format_recovery_alert(miner_id, miner),
+                }
+            )
         tracked[miner_id] = {
             "device_arch": miner.get("device_arch", "unknown"),
             "last_attest": miner.get("last_attest"),
             "missed_polls": 0,
-            "offline_alerted": False,
+            "offline_alerted": was_offline_alerted and not acknowledge,
         }
 
     for miner_id, info in list(tracked.items()):
@@ -377,11 +406,28 @@ def update_miner_tracking(state: dict, miners: list[dict] | None, *, offline_pol
         missed_polls = int(info.get("missed_polls", 0)) + 1
         info["missed_polls"] = missed_polls
         if missed_polls >= offline_polls and not info.get("offline_alerted"):
-            messages.append(format_offline_alert(miner_id, info))
-            info["offline_alerted"] = True
+            events.append(
+                {
+                    "kind": "offline",
+                    "miner_id": miner_id,
+                    "message": format_offline_alert(miner_id, info),
+                }
+            )
+            if acknowledge:
+                info["offline_alerted"] = True
         tracked[miner_id] = info
 
-    return messages
+    return events
+
+
+def update_miner_tracking(state: dict, miners: list[dict] | None, *, offline_polls: int) -> list[str]:
+    events = _update_miner_tracking_events(
+        state,
+        miners,
+        offline_polls=offline_polls,
+        acknowledge=True,
+    )
+    return [event["message"] for event in events]
 
 
 def check_reward_alert(
@@ -390,6 +436,7 @@ def check_reward_alert(
     *,
     reward_min: float | None,
     reward_max: float | None,
+    acknowledge: bool = True,
 ) -> str | None:
     if reward_min is None and reward_max is None:
         return None
@@ -410,7 +457,8 @@ def check_reward_alert(
     if state.get("last_reward_alert_epoch") == current_epoch:
         return None
 
-    state["last_reward_alert_epoch"] = current_epoch
+    if acknowledge:
+        state["last_reward_alert_epoch"] = current_epoch
     return format_reward_alert(epoch_data, reward_value, reward_min, reward_max)
 
 
@@ -436,29 +484,22 @@ def run_once(
     health_data = fetch_health(node_url)
     epoch_data = fetch_epoch(node_url)
     miners = fetch_miners(node_url)
-
-    messages = []
-    messages.extend(
-        update_health_state(
-            state,
-            health_data,
-            node_url=node_url,
-            tip_age_max=tip_age_max,
-            backup_age_max_hours=backup_age_max_hours,
-        )
+    alert_target_configured = _notification_target_configured(
+        discord_webhook=discord_webhook,
+        slack_webhook=slack_webhook,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
     )
-    messages.extend(update_miner_tracking(state, miners, offline_polls=offline_polls))
 
-    reward_message = check_reward_alert(
+    health_messages = update_health_state(
         state,
-        epoch_data,
-        reward_min=reward_min,
-        reward_max=reward_max,
+        health_data,
+        node_url=node_url,
+        tip_age_max=tip_age_max,
+        backup_age_max_hours=backup_age_max_hours,
+        acknowledge=False,
     )
-    if reward_message:
-        messages.append(reward_message)
-
-    for message in messages:
+    for message in health_messages:
         delivered = notify_channels(
             message,
             discord_webhook=discord_webhook,
@@ -466,8 +507,56 @@ def run_once(
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
         )
+        if delivered or not alert_target_configured:
+            state["last_health_ok"] = not health_problems(
+                health_data,
+                tip_age_max=tip_age_max,
+                backup_age_max_hours=backup_age_max_hours,
+            )
         status = "sent" if delivered else "suppressed"
         print(f"Alert {status}: {message.splitlines()[0]}")
+
+    miner_events = _update_miner_tracking_events(
+        state,
+        miners,
+        offline_polls=offline_polls,
+        acknowledge=False,
+    )
+    for event in miner_events:
+        message = event["message"]
+        delivered = notify_channels(
+            message,
+            discord_webhook=discord_webhook,
+            slack_webhook=slack_webhook,
+            telegram_token=telegram_token,
+            telegram_chat_id=telegram_chat_id,
+        )
+        if delivered or not alert_target_configured:
+            miner_state = state["tracked_miners"].get(event["miner_id"])
+            if miner_state is not None:
+                miner_state["offline_alerted"] = event["kind"] == "offline"
+        status = "sent" if delivered else "suppressed"
+        print(f"Alert {status}: {message.splitlines()[0]}")
+
+    reward_message = check_reward_alert(
+        state,
+        epoch_data,
+        reward_min=reward_min,
+        reward_max=reward_max,
+        acknowledge=False,
+    )
+    if reward_message:
+        delivered = notify_channels(
+            reward_message,
+            discord_webhook=discord_webhook,
+            slack_webhook=slack_webhook,
+            telegram_token=telegram_token,
+            telegram_chat_id=telegram_chat_id,
+        )
+        if delivered or not alert_target_configured:
+            state["last_reward_alert_epoch"] = epoch_data.get("epoch") if epoch_data else None
+        status = "sent" if delivered else "suppressed"
+        print(f"Alert {status}: {reward_message.splitlines()[0]}")
 
     if epoch_data:
         current_epoch = epoch_data.get("epoch")
@@ -482,9 +571,11 @@ def run_once(
             )
             if moltbook_key:
                 delivered = post_to_moltbook(moltbook_key, moltbook_url, epoch_message) or delivered
-            state["last_epoch"] = current_epoch
-            if delivered:
-                state["last_posted"] = now_iso()
+            epoch_target_configured = alert_target_configured or bool(moltbook_key)
+            if delivered or not epoch_target_configured:
+                state["last_epoch"] = current_epoch
+                if delivered:
+                    state["last_posted"] = now_iso()
             print(f"Observed new epoch {current_epoch}")
 
     return state
