@@ -67,6 +67,31 @@ def test_run_once_does_not_age_miners_on_malformed_collection(monkeypatch):
     assert updated["tracked_miners"]["miner-a"]["offline_alerted"] is False
 
 
+def test_run_once_does_not_age_miners_on_malformed_identifier(monkeypatch):
+    monkeypatch.setattr(epoch_reporter, "fetch_health", lambda node_url: _healthy_payload())
+    monkeypatch.setattr(epoch_reporter, "fetch_epoch", lambda node_url: None)
+    monkeypatch.setattr(epoch_reporter, "fetch_miners", lambda node_url: [{"miner": ["not-hashable"]}])
+
+    state = epoch_reporter.default_state()
+    state["tracked_miners"] = {
+        "miner-a": {
+            "device_arch": "x86_64",
+            "last_attest": None,
+            "missed_polls": 1,
+            "offline_alerted": False,
+        }
+    }
+
+    updated = epoch_reporter.run_once(
+        "https://node.example",
+        state,
+        offline_polls=2,
+    )
+
+    assert updated["tracked_miners"]["miner-a"]["missed_polls"] == 1
+    assert updated["tracked_miners"]["miner-a"]["offline_alerted"] is False
+
+
 def test_mixed_miner_records_fail_closed_before_tracking_mutation():
     state = {}
 
@@ -78,6 +103,31 @@ def test_mixed_miner_records_fail_closed_before_tracking_mutation():
 
     assert messages == []
     assert state == {}
+
+
+def test_malformed_miner_identifier_fails_closed_before_tracking_mutation():
+    for malformed_id in (["list-id"], {"nested": "id"}, 1, True):
+        state = {
+            "tracked_miners": {
+                "miner-a": {
+                    "device_arch": "x86_64",
+                    "last_attest": None,
+                    "missed_polls": 1,
+                    "offline_alerted": False,
+                }
+            }
+        }
+
+        messages = epoch_reporter.update_miner_tracking(
+            state,
+            [{"miner": malformed_id}],
+            offline_polls=2,
+        )
+
+        assert messages == []
+        assert state["tracked_miners"]["miner-a"]["missed_polls"] == 1
+        assert state["tracked_miners"]["miner-a"]["offline_alerted"] is False
+        assert list(state["tracked_miners"]) == ["miner-a"]
 
 
 def test_reward_helper_ignores_non_mapping_epoch_payloads():
