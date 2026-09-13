@@ -108,6 +108,7 @@ class BackupVerifier:
         
         for filename in required_files:
             filepath = self.backup_path / filename
+            self.results["checksums"][filename] = None
             if _is_single_link_regular_file(filepath):
                 checksum = self.calculate_checksum(filepath)
                 self.results["checksums"][filename] = checksum
