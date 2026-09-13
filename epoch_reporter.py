@@ -113,9 +113,22 @@ def load_state(state_file: str) -> dict:
 
 
 def save_state(state_file: str, state: dict) -> None:
-    """Save the reporter state to file."""
-    with open(state_file, "w") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
+    """Atomically save reporter state without truncating the last good snapshot."""
+    path = Path(state_file)
+    temp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        with open(temp_path, "x") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _fetch_json(node_url: str, path: str, label: str):
