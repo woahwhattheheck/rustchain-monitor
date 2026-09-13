@@ -108,3 +108,25 @@ def test_database_integrity_fails_closed_without_sqlite3(tmp_path, monkeypatch):
     assert verifier.results["errors"] == [
         "sqlite3 not available; cannot verify database integrity"
     ]
+
+
+def test_database_integrity_clears_prior_success_before_failed_recheck(tmp_path, monkeypatch):
+    verifier = _integrity_verifier(tmp_path)
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+            SimpleNamespace(returncode=1, stdout="ok\n", stderr="sqlite3 failed"),
+        ]
+    )
+    monkeypatch.setattr(
+        backup_verify_lam1688.subprocess,
+        "run",
+        lambda *args, **kwargs: next(responses),
+    )
+
+    assert verifier.verify_database_integrity() is True
+    assert verifier.results["integrity"] is True
+
+    assert verifier.verify_database_integrity() is False
+    assert verifier.results["integrity"] is False
+    assert "✗ FAILED" in verifier.generate_report()
