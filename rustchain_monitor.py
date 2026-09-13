@@ -12,7 +12,7 @@ Features:
 - Alert system for epoch settlements
 
 Usage:
-    python3 rustchain_monitor.py --node https://50.28.86.131
+    python3 rustchain_monitor.py --node https://50.28.86.131 --insecure
     python3 rustchain_monitor.py --miner your-miner-id --watch
 """
 
@@ -47,6 +47,7 @@ DEFAULT_MULTI_NODE_TARGETS = [
         "name": "Node 1",
         "role": "Primary",
         "url": DEFAULT_NODE_URL,
+        "insecure": True,
     },
     {
         "node_id": "node2",
@@ -106,6 +107,11 @@ def normalize_node_target(raw_target: dict, *, index: int = 0) -> dict:
                 f"node target {index + 1} field '{field}' must be a string"
             )
 
+    if "insecure" in raw_target and type(raw_target["insecure"]) is not bool:
+        raise ValueError(
+            f"node target {index + 1} field 'insecure' must be a boolean"
+        )
+
     url = str(raw_target.get("url") or "").strip().rstrip("/")
     if not url:
         raise ValueError("node target url is required")
@@ -119,6 +125,7 @@ def normalize_node_target(raw_target: dict, *, index: int = 0) -> dict:
         "name": name,
         "role": role,
         "url": url,
+        "insecure": raw_target.get("insecure", False),
     }
 
 
@@ -1002,6 +1009,7 @@ def collect_multi_node_snapshots(node_targets: list[dict], *, history_db_path: O
             target["url"],
             use_color=False,
             history_db_path=history_db_path or DEFAULT_HISTORY_DB,
+            insecure=target.get("insecure", False),
         )
         try:
             snapshot = monitor.collect_network_snapshot()
@@ -1067,10 +1075,14 @@ class RustChainMonitor:
         node_url: str = DEFAULT_NODE_URL,
         use_color: bool = True,
         history_db_path: Optional[str | Path] = None,
+        insecure: bool = False,
     ):
+        if type(insecure) is not bool:
+            raise ValueError("insecure must be a boolean")
         self.node_url = node_url.rstrip('/')
         self.session = requests.Session()
-        self.session.verify = False  # For self-signed certs
+        self.session.verify = not insecure
+        self.insecure = insecure
         self.use_color = use_color and sys.stdout.isatty()
         self.history_db_path = _history_db_path(history_db_path or DEFAULT_HISTORY_DB)
     
@@ -1489,6 +1501,7 @@ def main():
     parser.add_argument("--all-nodes", action="store_true", help="Use the default RustChain node fleet for summary/export operations")
     parser.add_argument("--nodes-config", help="JSON file containing a custom multi-node target list")
     parser.add_argument("--compare", help="Comma-separated miner IDs to compare using stored history")
+    parser.add_argument("--insecure", action="store_true", help="Disable TLS certificate verification for an explicitly trusted self-signed HTTPS node")
     parser.add_argument("--color", dest="color", action="store_true", default=True, help="Enable colored output (default: auto-detect)")
     parser.add_argument("--no-color", dest="color", action="store_false", help="Disable colored output")
     
@@ -1511,6 +1524,7 @@ def main():
         args.node,
         use_color=args.color,
         history_db_path=args.history_db if needs_history else None,
+        insecure=args.insecure,
     )
 
     if args.prometheus_listen:
