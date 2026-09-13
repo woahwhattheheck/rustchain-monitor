@@ -1,0 +1,45 @@
+name: Reward reconciliation
+
+on:
+  push:
+    paths:
+      - "reward_reconciliation.py"
+      - "tests/test_reward_reconciliation.py"
+      - "examples/reward-observations.example.json"
+      - "docs/reward-reconciliation.md"
+      - ".github/workflows/reward-reconciliation.yml"
+  pull_request:
+    paths:
+      - "reward_reconciliation.py"
+      - "tests/test_reward_reconciliation.py"
+      - "examples/reward-observations.example.json"
+      - "docs/reward-reconciliation.md"
+      - ".github/workflows/reward-reconciliation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m py_compile reward_reconciliation.py tests/test_reward_reconciliation.py
+      - name: Unit tests
+        run: python -m unittest -v tests.test_reward_reconciliation
+      - name: Optimized-mode tests
+        run: python -O -m unittest -v tests.test_reward_reconciliation
+      - name: Example compile and verify
+        run: |
+          tmp="$(mktemp -d)"
+          python reward_reconciliation.py compile examples/reward-observations.example.json \
+            --json-out "$tmp/report.json" --markdown-out "$tmp/report.md"
+          python reward_reconciliation.py verify examples/reward-observations.example.json "$tmp/report.json"
