@@ -26,6 +26,7 @@ Environment variables:
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -122,35 +123,46 @@ def _float_or_none(value):
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
 
 def _health_db_rw(health_data: dict) -> bool:
     if "db_rw" in health_data:
-        return bool(health_data.get("db_rw"))
-    db_value = str(health_data.get("db", "") or "").lower()
-    return "rw" in db_value
+        return health_data.get("db_rw") is True
+    db_value = str(health_data.get("db", "") or "").strip().lower()
+    return db_value in {"rw", "read-write", "read_write", "readwrite"}
 
 
 def health_problems(health_data: dict | None, *, tip_age_max: int, backup_age_max_hours: float) -> list[str]:
+    if health_data is None:
+        return ["health endpoint unavailable"]
+    if not isinstance(health_data, dict):
+        return ["health endpoint returned invalid payload"]
     if not health_data:
         return ["health endpoint unavailable"]
 
     problems = []
-    if not health_data.get("ok"):
+    if health_data.get("ok") is not True:
         problems.append("node health check returned not-ok")
     if not _health_db_rw(health_data):
         problems.append("database is not read-write")
 
-    tip_age = _float_or_none(health_data.get("tip_age_slots"))
-    if tip_age is not None and tip_age > float(tip_age_max):
-        problems.append(f"tip age {tip_age:.0f} slots exceeds {tip_age_max}")
+    if "tip_age_slots" in health_data:
+        tip_age = _float_or_none(health_data.get("tip_age_slots"))
+        if tip_age is None:
+            problems.append("tip age is not a finite number")
+        elif tip_age > float(tip_age_max):
+            problems.append(f"tip age {tip_age:.0f} slots exceeds {tip_age_max}")
 
-    backup_age = _float_or_none(health_data.get("backup_age_hours"))
-    if backup_age is not None and backup_age > float(backup_age_max_hours):
-        problems.append(f"backup age {backup_age:.2f}h exceeds {backup_age_max_hours:.2f}h")
+    if "backup_age_hours" in health_data:
+        backup_age = _float_or_none(health_data.get("backup_age_hours"))
+        if backup_age is None:
+            problems.append("backup age is not a finite number")
+        elif backup_age > float(backup_age_max_hours):
+            problems.append(f"backup age {backup_age:.2f}h exceeds {backup_age_max_hours:.2f}h")
 
     return problems
 
@@ -218,7 +230,7 @@ def format_recovery_alert(miner_id: str, miner: dict) -> str:
 
 def format_health_alert(node_url: str, problems: list[str], health_data: dict | None, *, recovered: bool = False) -> str:
     if recovered:
-        version = (health_data or {}).get("version", "unknown")
+        version = health_data.get("version", "unknown") if isinstance(health_data, dict) else "unknown"
         return f"Network health recovered\nNode: {node_url}\nVersion: {version}"
 
     lines = [
@@ -226,7 +238,7 @@ def format_health_alert(node_url: str, problems: list[str], health_data: dict | 
         f"Node: {node_url}",
         f"Problems: {', '.join(problems)}",
     ]
-    if health_data:
+    if isinstance(health_data, dict):
         lines.append(f"Version: {health_data.get('version', 'unknown')}")
         lines.append(f"Tip age: {health_data.get('tip_age_slots', 'n/a')}")
         lines.append(f"Backup age hours: {health_data.get('backup_age_hours', 'n/a')}")
@@ -240,6 +252,17 @@ def format_reward_alert(epoch_data: dict, reward_value: float, reward_min: float
         "Unexpected reward alert\n"
         f"Epoch: {epoch}\n"
         f"Observed reward: {reward_value} RTC\n"
+        f"Configured min: {reward_min}\n"
+        f"Configured max: {reward_max}"
+    )
+
+
+def format_invalid_reward_alert(epoch_data: dict, reward_min: float | None, reward_max: float | None) -> str:
+    epoch = epoch_data.get("epoch", "N/A")
+    return (
+        "Unexpected reward alert\n"
+        f"Epoch: {epoch}\n"
+        "Observed reward is not a finite number\n"
         f"Configured min: {reward_min}\n"
         f"Configured max: {reward_max}"
     )
@@ -445,16 +468,21 @@ def check_reward_alert(
 
     reward_value = extract_reward_value(epoch_data)
     current_epoch = epoch_data.get("epoch")
-    if reward_value is None or current_epoch is None:
+    if current_epoch is None:
         return None
+    if state.get("last_reward_alert_epoch") == current_epoch:
+        return None
+
+    if reward_value is None:
+        if acknowledge:
+            state["last_reward_alert_epoch"] = current_epoch
+        return format_invalid_reward_alert(epoch_data, reward_min, reward_max)
 
     out_of_range = (
         (reward_min is not None and reward_value < reward_min)
         or (reward_max is not None and reward_value > reward_max)
     )
     if not out_of_range:
-        return None
-    if state.get("last_reward_alert_epoch") == current_epoch:
         return None
 
     if acknowledge:
