@@ -35,13 +35,14 @@ BACKUP_PATTERNS = [
     "*.db.bak",
 ]
 
-# Key tables to verify
+# Key tables to verify. Bounty #755 requires each table to contain its
+# corresponding backup data, not merely to exist in the schema.
 REQUIRED_TABLES = {
     "balances": {"min_rows": 1, "check_positive": True},
-    "miner_attest_recent": {"min_rows": 0, "check_positive": False},
+    "miner_attest_recent": {"min_rows": 1, "check_positive": False},
     "headers": {"min_rows": 1, "check_positive": False},
-    "ledger": {"min_rows": 0, "check_positive": False},
-    "epoch_rewards": {"min_rows": 0, "check_positive": False},
+    "ledger": {"min_rows": 1, "check_positive": False},
+    "epoch_rewards": {"min_rows": 1, "check_positive": False},
 }
 
 # Max allowed row count difference (backup vs live)
