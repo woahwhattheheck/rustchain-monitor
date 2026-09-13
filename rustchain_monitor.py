@@ -20,8 +20,11 @@ import argparse
 import csv
 import json
 import math
+import os
+import stat
 import sys
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +65,28 @@ DEFAULT_MULTI_NODE_TARGETS = [
 
 def _history_db_path(db_path: str | Path) -> Path:
     return Path(db_path).expanduser()
+
+
+def _plain_output_path(output_path: str | Path) -> Path:
+    """Return an absolute output path whose parent chain does not traverse links."""
+    out_path = Path(output_path).expanduser().absolute()
+    parent = out_path.parent
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    current = Path(parent.anchor)
+    parts = parent.parts[1:] if parent.anchor else parent.parts
+    for part in parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            current.mkdir()
+            info = current.lstat()
+        file_attributes = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or (reparse_flag and file_attributes & reparse_flag):
+            raise ValueError(f"output parent must not traverse links: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"output parent component is not a directory: {current}")
+    return out_path
 
 
 def _slugify_node_text(value: str, fallback: str = "node") -> str:
@@ -445,35 +470,46 @@ def export_history_csv(
     with _history_connection(db_path) as conn:
         rows = _history_rows(conn, miner_id, since_ts=since_ts)
 
-    out_path = Path(csv_path).expanduser()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "observed_at_iso",
-                "observed_at_ts",
-                "miner_id",
-                "epoch",
-                "balance_rtc",
-                "delta_rtc",
-                "device_arch",
-                "is_active",
-            ]
-        )
-        for row in rows:
+    out_path = _plain_output_path(csv_path)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{out_path.name}.",
+        suffix=".tmp",
+        dir=out_path.parent,
+        text=True,
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", newline="") as handle:
+            writer = csv.writer(handle)
             writer.writerow(
                 [
-                    datetime.fromtimestamp(float(row["observed_at"]), timezone.utc).isoformat().replace("+00:00", "Z"),
-                    float(row["observed_at"]),
-                    row["miner_id"],
-                    row["epoch"],
-                    float(row["balance_rtc"]),
-                    float(row["delta_rtc"]),
-                    row["device_arch"] or "",
-                    int(row["is_active"] or 0),
+                    "observed_at_iso",
+                    "observed_at_ts",
+                    "miner_id",
+                    "epoch",
+                    "balance_rtc",
+                    "delta_rtc",
+                    "device_arch",
+                    "is_active",
                 ]
             )
+            for row in rows:
+                writer.writerow(
+                    [
+                        datetime.fromtimestamp(float(row["observed_at"]), timezone.utc).isoformat().replace("+00:00", "Z"),
+                        float(row["observed_at"]),
+                        row["miner_id"],
+                        row["epoch"],
+                        float(row["balance_rtc"]),
+                        float(row["delta_rtc"]),
+                        row["device_arch"] or "",
+                        int(row["is_active"] or 0),
+                    ]
+                )
+        os.replace(temp_path, out_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
     return len(rows)
 
 
