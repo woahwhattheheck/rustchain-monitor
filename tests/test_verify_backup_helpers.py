@@ -20,20 +20,20 @@ def _create_required_schema(db_path, *, balances_amount=1, headers_rows=1):
     conn.close()
 
 
-def test_find_latest_backup_prefers_newest_matching_pattern(tmp_path):
+def test_find_latest_backup_honors_preferred_pattern_over_newer_second_tier(tmp_path):
     ignored = tmp_path / "notes.txt"
-    older = tmp_path / "rustchain_v2_old.db.bak"
-    newer = tmp_path / "rustchain_v2_20260511.db"
+    preferred = tmp_path / "rustchain_v2_old.db.bak"
+    newer_second_tier = tmp_path / "rustchain_v2_20260511.db"
 
     ignored.write_text("not a backup")
-    older.write_text("old")
-    newer.write_text("new")
+    preferred.write_text("preferred")
+    newer_second_tier.write_text("second-tier")
 
     now = time.time()
-    os.utime(older, (now - 100, now - 100))
-    os.utime(newer, (now, now))
+    os.utime(preferred, (now - 100, now - 100))
+    os.utime(newer_second_tier, (now, now))
 
-    assert verify_backup.find_latest_backup(str(tmp_path)) == str(newer)
+    assert verify_backup.find_latest_backup(str(tmp_path)) == str(preferred)
 
 
 def test_find_latest_backup_returns_none_for_missing_or_empty_directory(tmp_path):
