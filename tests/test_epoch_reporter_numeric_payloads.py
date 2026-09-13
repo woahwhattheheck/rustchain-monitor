@@ -2,12 +2,49 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import epoch_reporter
+
+
+NUMERIC_ENV = (
+    "POLL_INTERVAL",
+    "OFFLINE_POLLS",
+    "REWARD_MIN",
+    "REWARD_MAX",
+    "HEALTH_TIP_AGE_MAX",
+    "HEALTH_BACKUP_AGE_MAX",
+)
+
+
+def _run_main_with_config(monkeypatch, config, *, argv=None, env=None):
+    for name in NUMERIC_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in (env or {}).items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setattr(epoch_reporter, "load_config", lambda path: config)
+    monkeypatch.setattr(epoch_reporter, "load_state", lambda path: epoch_reporter.default_state())
+    monkeypatch.setattr(epoch_reporter, "save_state", lambda path, state: None)
+    captured = []
+
+    def run_once(node_url, state, **kwargs):
+        captured.append((node_url, kwargs))
+        return state
+
+    monkeypatch.setattr(epoch_reporter, "run_once", run_once)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["epoch_reporter.py", "--once", *(argv or [])],
+    )
+    epoch_reporter.main()
+    return captured
 
 
 def test_format_epoch_message_normalizes_numeric_strings():
@@ -155,3 +192,69 @@ def test_invalid_reward_is_alerted_when_thresholds_are_configured():
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"poll_interval": 0.5},
+        {"poll_interval": 0},
+        {"offline_polls": 1.5},
+        {"offline_polls": -1},
+        {"tip_age_max": -1},
+        {"backup_age_max_hours": -0.1},
+        {"backup_age_max_hours": float("inf")},
+        {"reward_min": float("nan")},
+        {"reward_min": 3, "reward_max": 2},
+        {"offline_polls": True},
+    ],
+)
+def test_main_rejects_invalid_resolved_numeric_config(monkeypatch, config):
+    with pytest.raises(SystemExit) as error:
+        _run_main_with_config(monkeypatch, config)
+
+    assert error.value.code == 2
+
+
+def test_invalid_higher_precedence_environment_does_not_fall_back_to_config(monkeypatch):
+    with pytest.raises(SystemExit) as error:
+        _run_main_with_config(
+            monkeypatch,
+            {"poll_interval": 60},
+            env={"POLL_INTERVAL": "0"},
+        )
+
+    assert error.value.code == 2
+
+
+def test_cli_numeric_value_keeps_precedence_over_invalid_environment(monkeypatch):
+    captured = _run_main_with_config(
+        monkeypatch,
+        {"poll_interval": 60},
+        argv=["--interval", "5"],
+        env={"POLL_INTERVAL": "0"},
+    )
+
+    assert len(captured) == 1
+
+
+def test_valid_numeric_strings_are_normalized_before_run_once(monkeypatch):
+    captured = _run_main_with_config(
+        monkeypatch,
+        {
+            "poll_interval": "5",
+            "offline_polls": "3",
+            "reward_min": "0.5",
+            "reward_max": "2.5",
+            "tip_age_max": "0",
+            "backup_age_max_hours": "1.25",
+        },
+    )
+
+    assert len(captured) == 1
+    kwargs = captured[0][1]
+    assert kwargs["offline_polls"] == 3
+    assert kwargs["reward_min"] == 0.5
+    assert kwargs["reward_max"] == 2.5
+    assert kwargs["tip_age_max"] == 0
+    assert kwargs["backup_age_max_hours"] == 1.25
