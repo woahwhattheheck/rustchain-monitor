@@ -10,11 +10,22 @@ import os
 import sys
 import json
 import hashlib
+import stat
 import subprocess
 import argparse
 import tempfile
 from datetime import datetime
 from pathlib import Path
+
+
+def _is_single_link_regular_file(path):
+    """Return True only for an ordinary, non-aliased regular file."""
+    try:
+        file_stat = Path(path).lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(file_stat.st_mode) and file_stat.st_nlink == 1
+
 
 class BackupVerifier:
     """Verify RustChain database backups integrity"""
@@ -50,13 +61,16 @@ class BackupVerifier:
         
         for filename in required_files:
             filepath = self.backup_path / filename
-            if filepath.exists():
+            if _is_single_link_regular_file(filepath):
                 checksum = self.calculate_checksum(filepath)
                 self.results["checksums"][filename] = checksum
                 if checksum is None:
                     print(f"✗ {filename}: CHECKSUM FAILED")
                     continue
                 print(f"✓ {filename}: {checksum[:16]}...")
+            elif os.path.lexists(filepath):
+                self.results["errors"].append(f"Unsafe file type or link: {filename}")
+                print(f"✗ {filename}: UNSAFE FILE TYPE OR LINK")
             else:
                 self.results["errors"].append(f"Missing file: {filename}")
                 print(f"✗ {filename}: NOT FOUND")
@@ -67,7 +81,12 @@ class BackupVerifier:
         """Verify SQLite database integrity"""
         db_file = self.backup_path / "rustchain.db"
         self.results["integrity"] = False
-        if not db_file.exists():
+        if not os.path.lexists(db_file):
+            return False
+        if not _is_single_link_regular_file(db_file):
+            error = "Unsafe database file type or link: rustchain.db"
+            self.results["errors"].append(error)
+            print(f"✗ {error}")
             return False
         
         try:
@@ -114,12 +133,18 @@ class BackupVerifier:
             ) as temp_name:
                 temp_dir = Path(temp_name)
 
-                # Copy files to temp for restoration test
+                # Copy only ordinary single-link files to temp. Linked or
+                # special entries must never redirect restoration outside the
+                # selected backup directory.
                 for file in self.backup_path.glob("*"):
-                    if file.is_file():
-                        dest = temp_dir / file.name
-                        dest.write_bytes(file.read_bytes())
-                        print(f"✓ Restored {file.name} to test location")
+                    file_stat = file.lstat()
+                    if stat.S_ISDIR(file_stat.st_mode):
+                        continue
+                    if not _is_single_link_regular_file(file):
+                        raise ValueError(f"Unsafe backup entry: {file.name}")
+                    dest = temp_dir / file.name
+                    dest.write_bytes(file.read_bytes())
+                    print(f"✓ Restored {file.name} to test location")
                 
                 # Verify restored files
                 for file in temp_dir.glob("*"):
@@ -166,6 +191,29 @@ Wallet: Eud4bLR7sjwUviGkSA9w8Wg4PYY1api3Ybrjtsat3J4G
 Bounty #755 - Automated Backup Verification
 """
         return report
+
+    def save_report(self, report):
+        """Atomically publish the report without following an existing link."""
+        report_file = self.backup_path / "verification_report.txt"
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.backup_path,
+                prefix=".verification_report.",
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                handle.write(report)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, report_file)
+            temp_path = None
+            return report_file
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
     
     def run(self):
         """Run full verification"""
@@ -186,10 +234,8 @@ Bounty #755 - Automated Backup Verification
         report = self.generate_report()
         print(report)
         
-        # Save report
-        report_file = self.backup_path / "verification_report.txt"
-        with open(report_file, "w") as f:
-            f.write(report)
+        # Save report without following a pre-existing report symlink/hardlink.
+        report_file = self.save_report(report)
         print(f"\nReport saved to: {report_file}")
         
         return self.results
