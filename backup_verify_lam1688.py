@@ -134,6 +134,7 @@ class BackupVerifier:
                 dir=self.backup_path.parent,
             ) as temp_name:
                 temp_dir = Path(temp_name)
+                restored_pairs = []
 
                 # Copy only ordinary single-link files to temp. Linked or
                 # special entries must never redirect restoration outside the
@@ -146,14 +147,27 @@ class BackupVerifier:
                         raise ValueError(f"Unsafe backup entry: {file.name}")
                     dest = temp_dir / file.name
                     dest.write_bytes(file.read_bytes())
+                    restored_pairs.append((file, dest))
                     print(f"✓ Restored {file.name} to test location")
                 
-                # Verify restored files
-                for file in temp_dir.glob("*"):
-                    original = self.backup_path / file.name
-                    if file.exists() and original.exists():
-                        if file.stat().st_size == original.stat().st_size:
-                            print(f"✓ {file.name} restoration verified")
+                # Verify every expected restored copy remains an ordinary file
+                # and exactly matches the source. Missing, truncated, or
+                # same-length corrupted copies must fail closed.
+                for original, restored in restored_pairs:
+                    if not _is_single_link_regular_file(restored):
+                        raise ValueError(f"Unsafe or missing restored file: {restored.name}")
+                    if not _is_single_link_regular_file(original):
+                        raise ValueError(f"Unsafe or missing source during restoration verification: {original.name}")
+                    if restored.stat().st_size != original.stat().st_size:
+                        raise ValueError(f"Restoration size mismatch: {restored.name}")
+
+                    restored_checksum = self.calculate_checksum(restored)
+                    original_checksum = self.calculate_checksum(original)
+                    if restored_checksum is None or original_checksum is None:
+                        raise ValueError(f"Unable to checksum restored entry: {restored.name}")
+                    if restored_checksum != original_checksum:
+                        raise ValueError(f"Restored content mismatch: {restored.name}")
+                    print(f"✓ {restored.name} restoration verified")
                 
             self.results["restoration"] = True
             return True
