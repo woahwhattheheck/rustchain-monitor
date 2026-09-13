@@ -18,6 +18,28 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _is_link_like(file_stat):
+    """Return True for symlinks and Windows reparse-point entries."""
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(file_stat, "st_file_attributes", 0)
+    return stat.S_ISLNK(file_stat.st_mode) or bool(
+        reparse_flag and file_attributes & reparse_flag
+    )
+
+
+def _has_real_directory_parents(path):
+    """Require every lexical parent of path to be an ordinary directory."""
+    absolute_path = Path(path).absolute()
+    for parent in reversed(absolute_path.parents):
+        try:
+            parent_stat = parent.lstat()
+        except OSError:
+            return False
+        if _is_link_like(parent_stat) or not stat.S_ISDIR(parent_stat.st_mode):
+            return False
+    return True
+
+
 def _is_single_link_regular_file(path):
     """Return True only for an ordinary, non-aliased regular file."""
     try:
@@ -43,7 +65,13 @@ class BackupVerifier:
         }
 
     def validate_backup_root(self):
-        """Require the selected backup entry itself to be a real directory."""
+        """Require the selected backup path and its parents to be real directories."""
+        if not _has_real_directory_parents(self.backup_path):
+            error = "Unsafe backup root: parent components must be real directories"
+            self.results["errors"].append(error)
+            print(f"✗ {error}")
+            return False
+
         try:
             root_stat = self.backup_path.lstat()
         except FileNotFoundError:
@@ -52,7 +80,7 @@ class BackupVerifier:
             print(f"✗ {error}")
             return False
 
-        if not stat.S_ISDIR(root_stat.st_mode):
+        if _is_link_like(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
             error = "Unsafe backup root: expected a real directory"
             self.results["errors"].append(error)
             print(f"✗ {error}")
@@ -256,8 +284,8 @@ Bounty #755 - Automated Backup Verification
         print("RustChain Backup Verification Tool")
         print("=" * 50)
 
-        # Refuse a linked/non-directory backup root before reading backup
-        # entries or publishing the verifier report through that path.
+        # Refuse a linked/non-directory backup root or lexical parent before
+        # reading backup entries or publishing the verifier report through it.
         if not self.validate_backup_root():
             report = self.generate_report()
             print(report)

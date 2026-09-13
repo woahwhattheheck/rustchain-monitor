@@ -98,3 +98,50 @@ def test_report_publication_replaces_symlink_without_touching_target(tmp_path):
     assert not report_path.is_symlink()
     assert report_path.read_text() == "safe report\n"
     assert outside.read_text() == "sentinel"
+
+
+def test_run_rejects_linked_backup_parent_before_external_traversal(tmp_path, monkeypatch):
+    external_parent = tmp_path / "external-parent"
+    backup = external_parent / "backup"
+    backup.mkdir(parents=True)
+    sentinel = backup / "sentinel.txt"
+    sentinel.write_text("do not touch", encoding="utf-8")
+
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(external_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    selected_backup = linked_parent / "backup"
+    verifier = legacy.BackupVerifier(selected_backup)
+    monkeypatch.setattr(
+        verifier,
+        "verify_backup_files",
+        lambda: pytest.fail("linked parent must fail before file verification"),
+    )
+    monkeypatch.setattr(
+        verifier,
+        "verify_database_integrity",
+        lambda: pytest.fail("linked parent must fail before sqlite verification"),
+    )
+    monkeypatch.setattr(
+        verifier,
+        "test_restoration",
+        lambda: pytest.fail("linked parent must fail before restoration"),
+    )
+    monkeypatch.setattr(
+        verifier,
+        "save_report",
+        lambda report: pytest.fail("linked parent must fail before report publication"),
+    )
+
+    results = verifier.run()
+
+    assert results["integrity"] is False
+    assert results["restoration"] is False
+    assert results["errors"] == [
+        "Unsafe backup root: parent components must be real directories"
+    ]
+    assert sentinel.read_text(encoding="utf-8") == "do not touch"
+    assert not (backup / "verification_report.txt").exists()
