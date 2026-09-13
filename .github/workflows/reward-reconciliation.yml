@@ -5,6 +5,7 @@ on:
     paths:
       - "reward_reconciliation.py"
       - "tests/test_reward_reconciliation.py"
+      - "tests/test_reward_reconciliation_hardening.py"
       - "examples/reward-observations.example.json"
       - "docs/reward-reconciliation.md"
       - ".github/workflows/reward-reconciliation.yml"
@@ -12,6 +13,7 @@ on:
     paths:
       - "reward_reconciliation.py"
       - "tests/test_reward_reconciliation.py"
+      - "tests/test_reward_reconciliation_hardening.py"
       - "examples/reward-observations.example.json"
       - "docs/reward-reconciliation.md"
       - ".github/workflows/reward-reconciliation.yml"
@@ -32,11 +34,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile reward_reconciliation.py tests/test_reward_reconciliation.py
+        run: >-
+          python -m py_compile reward_reconciliation.py
+          tests/test_reward_reconciliation.py
+          tests/test_reward_reconciliation_hardening.py
       - name: Unit tests
-        run: python -m unittest -v tests.test_reward_reconciliation
+        run: >-
+          python -m unittest -v
+          tests.test_reward_reconciliation
+          tests.test_reward_reconciliation_hardening
       - name: Optimized-mode tests
-        run: python -O -m unittest -v tests.test_reward_reconciliation
+        run: >-
+          python -O -m unittest -v
+          tests.test_reward_reconciliation
+          tests.test_reward_reconciliation_hardening
       - name: Example compile and verify
         run: |
           tmp="$(mktemp -d)"
