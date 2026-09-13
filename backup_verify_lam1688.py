@@ -66,30 +66,37 @@ class BackupVerifier:
     def verify_database_integrity(self):
         """Verify SQLite database integrity"""
         db_file = self.backup_path / "rustchain.db"
+        self.results["integrity"] = False
         if not db_file.exists():
             return False
         
         try:
-            # Run SQLite integrity check
+            # PRAGMA integrity_check succeeds only when sqlite3 exits cleanly
+            # and emits exactly "ok". Treat every other result as a failed
+            # verification rather than accepting a truthy-looking substring.
             result = subprocess.run(
                 ["sqlite3", str(db_file), "PRAGMA integrity_check;"],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
-            if "ok" in result.stdout.lower():
+            stdout = result.stdout.strip()
+            if result.returncode == 0 and stdout.lower() == "ok":
                 self.results["integrity"] = True
                 print("✓ Database integrity check passed")
                 return True
-            else:
-                self.results["errors"].append(f"Database integrity failed: {result.stdout}")
-                print(f"✗ Database integrity check failed: {result.stdout}")
-                return False
+
+            details = (result.stderr or result.stdout).strip()
+            if not details:
+                details = f"sqlite3 exited with status {result.returncode}"
+            self.results["errors"].append(f"Database integrity failed: {details}")
+            print(f"✗ Database integrity check failed: {details}")
+            return False
         except FileNotFoundError:
-            # sqlite3 not available, skip
-            print("⚠ sqlite3 not available, skipping integrity check")
-            self.results["integrity"] = True  # Assume OK if can't check
-            return True
+            error = "sqlite3 not available; cannot verify database integrity"
+            self.results["errors"].append(error)
+            print(f"✗ {error}")
+            return False
         except Exception as e:
             self.results["errors"].append(f"Integrity check error: {e}")
             return False
