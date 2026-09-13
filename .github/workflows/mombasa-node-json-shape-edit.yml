@@ -1,0 +1,236 @@
+name: Mombasa Node JSON Shape Edit
+
+on:
+  push:
+    branches:
+      - mombasa-913/node-json-shape-fence-20260913
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: mombasa-913/node-json-shape-fence-20260913
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Apply exact bounded source edit and regression suite
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("rustchain_monitor.py")
+          text = source_path.read_text()
+
+          helper_anchor = '''def _health_db_rw(health: dict) -> bool:
+              if "db_rw" in health:
+                  return health.get("db_rw") is True
+              db_value = str(health.get("db", "") or "").strip().lower()
+              return db_value in {"rw", "read-write", "read_write", "readwrite"}
+
+
+          def record_history_snapshot(
+          '''
+          helper_replacement = '''def _health_db_rw(health: dict) -> bool:
+              if "db_rw" in health:
+                  return health.get("db_rw") is True
+              db_value = str(health.get("db", "") or "").strip().lower()
+              return db_value in {"rw", "read-write", "read_write", "readwrite"}
+
+
+          def _require_json_object(value, endpoint: str) -> dict:
+              if type(value) is not dict:
+                  raise ValueError(f"{endpoint} returned invalid JSON root: expected object")
+              return value
+
+
+          def _require_json_object_list(value, endpoint: str) -> list[dict]:
+              if type(value) is not list or any(type(item) is not dict for item in value):
+                  raise ValueError(f"{endpoint} returned invalid JSON root: expected list of objects")
+              return value
+
+
+          def record_history_snapshot(
+          '''
+
+          method_anchor = '''    def get_health(self) -> Dict:
+              """Check node health"""
+              response = self.session.get(f"{self.node_url}/health")
+              response.raise_for_status()
+              return response.json()
+              
+              def get_epoch(self) -> Dict:
+              """Get current epoch info"""
+              response = self.session.get(f"{self.node_url}/epoch")
+              response.raise_for_status()
+              return response.json()
+              
+              def get_miners(self) -> List[Dict]:
+              """Get all active miners"""
+              response = self.session.get(f"{self.node_url}/api/miners")
+              response.raise_for_status()
+              return response.json()
+              
+              def get_miner_balance(self, miner_id: str) -> float:
+              """Get specific miner's RTC balance"""
+              response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
+              response.raise_for_status()
+              balance = _coerce_float(response.json().get("balance_rtc", 0.0), None)
+              if balance is None:
+                  raise ValueError("balance_rtc must be a finite number")
+              return balance
+          '''
+
+          method_replacement = '''    def get_health(self) -> Dict:
+              """Check node health"""
+              response = self.session.get(f"{self.node_url}/health")
+              response.raise_for_status()
+              return _require_json_object(response.json(), "/health")
+              
+              def get_epoch(self) -> Dict:
+              """Get current epoch info"""
+              response = self.session.get(f"{self.node_url}/epoch")
+              response.raise_for_status()
+              return _require_json_object(response.json(), "/epoch")
+              
+              def get_miners(self) -> List[Dict]:
+              """Get all active miners"""
+              response = self.session.get(f"{self.node_url}/api/miners")
+              response.raise_for_status()
+              return _require_json_object_list(response.json(), "/api/miners")
+              
+              def get_miner_balance(self, miner_id: str) -> float:
+              """Get specific miner's RTC balance"""
+              response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
+              response.raise_for_status()
+              payload = _require_json_object(response.json(), "/wallet/balance")
+              balance = _coerce_float(payload.get("balance_rtc", 0.0), None)
+              if balance is None:
+                  raise ValueError("balance_rtc must be a finite number")
+              return balance
+          '''
+
+          if text.count(helper_anchor) != 1:
+              raise SystemExit(f"helper anchor count={text.count(helper_anchor)}, expected 1")
+          if text.count(method_anchor) != 1:
+              raise SystemExit(f"method anchor count={text.count(method_anchor)}, expected 1")
+          text = text.replace(helper_anchor, helper_replacement)
+          text = text.replace(method_anchor, method_replacement)
+          source_path.write_text(text)
+
+          test_path = Path("tests/test_rustchain_monitor_json_shapes.py")
+          test_path.write_text('''import unittest
+          from unittest import mock
+
+          import rustchain_monitor
+
+
+          class FakeResponse:
+              def __init__(self, payload):
+                  self.payload = payload
+
+              def raise_for_status(self):
+                  return None
+
+              def json(self):
+                  return self.payload
+
+
+          class NodeJsonShapeTests(unittest.TestCase):
+              def monitor_for(self, payload):
+                  monitor = rustchain_monitor.RustChainMonitor(
+                      "https://node.example", use_color=False
+                  )
+                  monitor.session.get = lambda *_args, **_kwargs: FakeResponse(payload)
+                  return monitor
+
+              def test_object_endpoints_reject_non_object_roots(self):
+                  invalid_roots = ([], None, "ok", 1, True)
+                  for method_name in ("get_health", "get_epoch"):
+                      for payload in invalid_roots:
+                          with self.subTest(method=method_name, payload=payload):
+                              monitor = self.monitor_for(payload)
+                              with self.assertRaisesRegex(ValueError, "expected object"):
+                                  getattr(monitor, method_name)()
+
+              def test_object_endpoints_accept_objects(self):
+                  self.assertEqual(self.monitor_for({"ok": True}).get_health(), {"ok": True})
+                  self.assertEqual(self.monitor_for({"epoch": 7}).get_epoch(), {"epoch": 7})
+
+              def test_miners_requires_list_of_objects(self):
+                  for payload in ({}, None, "miners", 7, True, [None], [1], [{}, "bad"]):
+                      with self.subTest(payload=payload):
+                          with self.assertRaisesRegex(ValueError, "expected list of objects"):
+                              self.monitor_for(payload).get_miners()
+
+                  self.assertEqual(self.monitor_for([]).get_miners(), [])
+                  miners = [{"miner": "m1"}, {"miner_id": "m2"}]
+                  self.assertEqual(self.monitor_for(miners).get_miners(), miners)
+
+              def test_balance_requires_object_before_value_coercion(self):
+                  for payload in ([], None, "1.25", 1.25, True):
+                      with self.subTest(payload=payload):
+                          with self.assertRaisesRegex(ValueError, "expected object"):
+                              self.monitor_for(payload).get_miner_balance("miner-a")
+
+                  self.assertEqual(
+                      self.monitor_for({"balance_rtc": "1.25"}).get_miner_balance("miner-a"),
+                      1.25,
+                  )
+
+              def test_bad_health_root_routes_multi_node_snapshot_to_failed_state(self):
+                  with mock.patch.object(
+                      rustchain_monitor.requests.Session,
+                      "get",
+                      return_value=FakeResponse([]),
+                  ):
+                      snapshots = rustchain_monitor.collect_multi_node_snapshots(
+                          [
+                              {
+                                  "node_id": "node-a",
+                                  "name": "Node A",
+                                  "role": "Primary",
+                                  "url": "https://node.example",
+                              }
+                          ]
+                      )
+
+                  self.assertEqual(len(snapshots), 1)
+                  snapshot = snapshots[0]
+                  self.assertFalse(snapshot["summary"]["scrape_ok"])
+                  self.assertFalse(snapshot["summary"]["node_ok"])
+                  self.assertIn("/health returned invalid JSON root", snapshot["error"])
+
+
+          if __name__ == "__main__":
+              unittest.main()
+          ''')
+          PY
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest
+      - name: Verify focused and full suite
+        run: |
+          python -m py_compile rustchain_monitor.py
+          python -m unittest -v tests.test_rustchain_monitor_json_shapes
+          pytest -q
+      - name: Commit only production and regression files
+        shell: bash
+        run: |
+          rm .github/workflows/mombasa-node-json-shape-edit.yml
+          git status --short
+          git diff --check
+          git config user.name "woahwhattheheck"
+          git config user.email "brycembusiness2@gmail.com"
+          git add rustchain_monitor.py tests/test_rustchain_monitor_json_shapes.py .github/workflows/mombasa-node-json-shape-edit.yml
+          git commit -m "fix(monitor): validate node JSON root shapes"
+          git push origin HEAD:mombasa-913/node-json-shape-fence-20260913
