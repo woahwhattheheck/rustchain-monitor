@@ -8,7 +8,7 @@ def test_required_directory_path_fails_verification_without_crashing(tmp_path):
     backup_dir = tmp_path / "backup"
     backup_dir.mkdir()
 
-    # Exists, but cannot be opened as a file for SHA-256 calculation.
+    # Exists, but is not an ordinary regular backup file.
     (backup_dir / "rustchain.db").mkdir()
     (backup_dir / "wallets.db").write_bytes(b"wallet-bytes")
     (backup_dir / "miner_state.json").write_text('{"height": 42}')
@@ -17,10 +17,7 @@ def test_required_directory_path_fails_verification_without_crashing(tmp_path):
 
     assert verifier.verify_backup_files() is False
     assert verifier.results["checksums"]["rustchain.db"] is None
-    assert any(
-        error.startswith("Error calculating checksum:")
-        for error in verifier.results["errors"]
-    )
+    assert verifier.results["errors"] == ["Unsafe file type or link: rustchain.db"]
 
 
 def test_valid_required_files_still_verify(tmp_path):
