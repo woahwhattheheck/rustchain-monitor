@@ -150,6 +150,109 @@ def _float_or_none(value):
         return None
 
 
+def _env_numeric(environ: dict, key: str):
+    value = environ.get(key)
+    return None if value in (None, "") else value
+
+
+def _resolved_number(
+    parser: argparse.ArgumentParser,
+    label: str,
+    *values,
+    integer: bool = False,
+    minimum: float | None = None,
+    optional: bool = False,
+):
+    raw_value = first_non_none(*values)
+    if raw_value is None or (optional and raw_value == ""):
+        if optional:
+            return None
+        parser.error(f"{label} is required")
+    if isinstance(raw_value, bool):
+        parser.error(f"{label} must be a number")
+
+    parsed = _float_or_none(raw_value)
+    if parsed is None:
+        parser.error(f"{label} must be a finite number")
+    if integer and not parsed.is_integer():
+        parser.error(f"{label} must be an integer")
+    if minimum is not None and parsed < minimum:
+        parser.error(f"{label} must be at least {minimum:g}")
+    return int(parsed) if integer else parsed
+
+
+def resolve_numeric_settings(
+    parser: argparse.ArgumentParser,
+    args,
+    config: dict,
+    environ: dict | None = None,
+) -> dict:
+    """Resolve numeric settings by CLI > env > config > default, then validate."""
+    environ = os.environ if environ is None else environ
+    settings = {
+        "poll_interval": _resolved_number(
+            parser,
+            "poll interval",
+            args.interval,
+            _env_numeric(environ, "POLL_INTERVAL"),
+            config.get("poll_interval"),
+            DEFAULT_INTERVAL,
+            integer=True,
+            minimum=1,
+        ),
+        "offline_polls": _resolved_number(
+            parser,
+            "offline polls",
+            args.offline_polls,
+            _env_numeric(environ, "OFFLINE_POLLS"),
+            config.get("offline_polls"),
+            DEFAULT_OFFLINE_POLLS,
+            integer=True,
+            minimum=1,
+        ),
+        "reward_min": _resolved_number(
+            parser,
+            "reward minimum",
+            args.reward_min,
+            _env_numeric(environ, "REWARD_MIN"),
+            config.get("reward_min"),
+            optional=True,
+        ),
+        "reward_max": _resolved_number(
+            parser,
+            "reward maximum",
+            args.reward_max,
+            _env_numeric(environ, "REWARD_MAX"),
+            config.get("reward_max"),
+            optional=True,
+        ),
+        "tip_age_max": _resolved_number(
+            parser,
+            "tip age maximum",
+            args.tip_age_max,
+            _env_numeric(environ, "HEALTH_TIP_AGE_MAX"),
+            config.get("tip_age_max"),
+            DEFAULT_TIP_AGE_MAX,
+            integer=True,
+            minimum=0,
+        ),
+        "backup_age_max_hours": _resolved_number(
+            parser,
+            "backup age maximum",
+            args.backup_age_max_hours,
+            _env_numeric(environ, "HEALTH_BACKUP_AGE_MAX"),
+            config.get("backup_age_max_hours"),
+            DEFAULT_BACKUP_AGE_MAX_HOURS,
+            minimum=0,
+        ),
+    }
+    reward_min = settings["reward_min"]
+    reward_max = settings["reward_max"]
+    if reward_min is not None and reward_max is not None and reward_min > reward_max:
+        parser.error("reward minimum must not exceed reward maximum")
+    return settings
+
+
 def _health_db_rw(health_data: dict) -> bool:
     if "db_rw" in health_data:
         return health_data.get("db_rw") is True
@@ -672,13 +775,14 @@ def main():
     telegram_chat_id = first_non_none(args.telegram_chat_id, os.environ.get("TELEGRAM_CHAT_ID"), config.get("telegram_chat_id"))
     moltbook_key = first_non_none(args.moltbook_key, os.environ.get("MOLTBOOK_API_KEY"), config.get("moltbook_api_key"))
     moltbook_url = first_non_none(args.moltbook_url, os.environ.get("MOLTBOOK_API_URL"), config.get("moltbook_api_url"), DEFAULT_MOLTBOOK_URL)
-    poll_interval = int(first_non_none(args.interval, _float_or_none(os.environ.get("POLL_INTERVAL")), config.get("poll_interval"), DEFAULT_INTERVAL))
+    numeric_settings = resolve_numeric_settings(parser, args, config)
+    poll_interval = numeric_settings["poll_interval"]
     state_file = first_non_none(args.state_file, os.environ.get("STATE_FILE"), config.get("state_file"), DEFAULT_STATE_FILE)
-    offline_polls = int(first_non_none(args.offline_polls, _float_or_none(os.environ.get("OFFLINE_POLLS")), config.get("offline_polls"), DEFAULT_OFFLINE_POLLS))
-    reward_min = first_non_none(args.reward_min, _float_or_none(os.environ.get("REWARD_MIN")), _float_or_none(config.get("reward_min")))
-    reward_max = first_non_none(args.reward_max, _float_or_none(os.environ.get("REWARD_MAX")), _float_or_none(config.get("reward_max")))
-    tip_age_max = int(first_non_none(args.tip_age_max, _float_or_none(os.environ.get("HEALTH_TIP_AGE_MAX")), config.get("tip_age_max"), DEFAULT_TIP_AGE_MAX))
-    backup_age_max_hours = float(first_non_none(args.backup_age_max_hours, _float_or_none(os.environ.get("HEALTH_BACKUP_AGE_MAX")), config.get("backup_age_max_hours"), DEFAULT_BACKUP_AGE_MAX_HOURS))
+    offline_polls = numeric_settings["offline_polls"]
+    reward_min = numeric_settings["reward_min"]
+    reward_max = numeric_settings["reward_max"]
+    tip_age_max = numeric_settings["tip_age_max"]
+    backup_age_max_hours = numeric_settings["backup_age_max_hours"]
 
     print("RustChain Epoch Reporter starting...")
     print(f"Node: {node_url}")
