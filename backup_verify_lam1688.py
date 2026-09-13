@@ -38,6 +38,7 @@ class BackupVerifier:
             "backup_path": str(backup_path),
             "checksums": {},
             "integrity": False,
+            "restoration": False,
             "errors": []
         }
     
@@ -123,6 +124,7 @@ class BackupVerifier:
     def test_restoration(self):
         """Test backup restoration procedure"""
         print("\nTesting restoration procedure...")
+        self.results["restoration"] = False
         
         try:
             # Use a uniquely owned scratch directory so verification never
@@ -153,6 +155,7 @@ class BackupVerifier:
                         if file.stat().st_size == original.stat().st_size:
                             print(f"✓ {file.name} restoration verified")
                 
+            self.results["restoration"] = True
             return True
         except Exception as e:
             self.results["errors"].append(f"Restoration test failed: {e}")
@@ -175,7 +178,7 @@ Backup Path: {self.results['backup_path']}
 {'✓ PASSED' if self.results['integrity'] else '✗ FAILED'}
 
 ## Restoration Test
-{'✓ PASSED' if not self.results['errors'] else '✗ FAILED'}
+{'✓ PASSED' if self.results['restoration'] else '✗ FAILED'}
 
 ## Errors
 """
