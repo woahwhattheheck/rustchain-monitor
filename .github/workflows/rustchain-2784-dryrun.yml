@@ -1,0 +1,59 @@
+name: RustChain 2784 dry-run evidence
+
+on:
+  push:
+    branches:
+      - paid/rustchain-2784-dryrun-zsol-20260913
+    paths:
+      - .github/workflows/rustchain-2784-dryrun.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact upstream RustChain main
+        uses: actions/checkout@v4
+        with:
+          repository: Scottcjn/Rustchain
+          ref: 8c79fba7561283ff8c880258152cd15e2610c312
+          path: Rustchain
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check requests pynacl
+
+      - name: Record runner hardware and virtualization context
+        run: |
+          uname -a
+          lscpu
+          free -h
+          systemd-detect-virt || true
+
+      - name: Run exact miner dry-run
+        working-directory: Rustchain
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 miners/linux/rustchain_linux_miner.py \
+            --dry-run \
+            --wallet woahwhattheheck \
+            --verbose \
+            --show-payload \
+            2>&1 | tee /tmp/rustchain-2784.log
+
+      - name: Upload dry-run output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustchain-2784-dryrun-output
+          path: /tmp/rustchain-2784.log
+          if-no-files-found: warn
