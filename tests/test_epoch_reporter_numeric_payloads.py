@@ -68,7 +68,15 @@ def test_run_once_survives_numeric_string_epoch_fields(monkeypatch):
 
 
 def test_float_parser_rejects_nonfinite_values():
-    for value in ("NaN", "Infinity", "-Infinity", math.nan, math.inf, -math.inf):
+    for value in (
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        math.nan,
+        math.inf,
+        -math.inf,
+        10 ** 10000,
+    ):
         assert epoch_reporter._float_or_none(value) is None
 
     assert epoch_reporter._float_or_none("1.25") == 1.25
@@ -221,6 +229,7 @@ def test_empty_numeric_env_value_remains_unset():
         ("poll_interval", -1),
         ("poll_interval", "Infinity"),
         ("poll_interval", True),
+        ("poll_interval", 10 ** 10000),
         ("offline_polls", 0),
         ("offline_polls", -1),
         ("offline_polls", 1.5),
