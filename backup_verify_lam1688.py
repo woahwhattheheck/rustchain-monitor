@@ -41,6 +41,24 @@ class BackupVerifier:
             "restoration": False,
             "errors": []
         }
+
+    def validate_backup_root(self):
+        """Require the selected backup entry itself to be a real directory."""
+        try:
+            root_stat = self.backup_path.lstat()
+        except FileNotFoundError:
+            error = "Invalid backup root: path does not exist"
+            self.results["errors"].append(error)
+            print(f"✗ {error}")
+            return False
+
+        if not stat.S_ISDIR(root_stat.st_mode):
+            error = "Unsafe backup root: expected a real directory"
+            self.results["errors"].append(error)
+            print(f"✗ {error}")
+            return False
+
+        return True
     
     def calculate_checksum(self, file_path):
         """Calculate SHA256 checksum of file"""
@@ -237,6 +255,13 @@ Bounty #755 - Automated Backup Verification
         print("=" * 50)
         print("RustChain Backup Verification Tool")
         print("=" * 50)
+
+        # Refuse a linked/non-directory backup root before reading backup
+        # entries or publishing the verifier report through that path.
+        if not self.validate_backup_root():
+            report = self.generate_report()
+            print(report)
+            return self.results
         
         # Verify backup files
         self.verify_backup_files()
