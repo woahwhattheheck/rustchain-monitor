@@ -119,6 +119,18 @@ def fetch_health(node_url: str):
     return _fetch_json(node_url, "/health", "health")
 
 
+def _mapping_payload_or_none(value) -> dict | None:
+    return value if isinstance(value, dict) else None
+
+
+def _record_list_or_none(value) -> list[dict] | None:
+    if not isinstance(value, list):
+        return None
+    if any(not isinstance(item, dict) for item in value):
+        return None
+    return value
+
+
 def _float_or_none(value):
     try:
         if value is None or value == "":
@@ -168,6 +180,7 @@ def health_problems(health_data: dict | None, *, tip_age_max: int, backup_age_ma
 
 
 def extract_reward_value(epoch_data: dict | None):
+    epoch_data = _mapping_payload_or_none(epoch_data)
     if not epoch_data:
         return None
     return _float_or_none(
@@ -394,6 +407,7 @@ def _update_miner_tracking_events(
     offline_polls: int,
     acknowledge: bool,
 ) -> list[dict]:
+    miners = _record_list_or_none(miners)
     if miners is None:
         return []
 
@@ -463,6 +477,7 @@ def check_reward_alert(
 ) -> str | None:
     if reward_min is None and reward_max is None:
         return None
+    epoch_data = _mapping_payload_or_none(epoch_data)
     if not epoch_data:
         return None
 
@@ -510,8 +525,8 @@ def run_once(
     state = normalize_state(state)
 
     health_data = fetch_health(node_url)
-    epoch_data = fetch_epoch(node_url)
-    miners = fetch_miners(node_url)
+    epoch_data = _mapping_payload_or_none(fetch_epoch(node_url))
+    miners = _record_list_or_none(fetch_miners(node_url))
     alert_target_configured = _notification_target_configured(
         discord_webhook=discord_webhook,
         slack_webhook=slack_webhook,
