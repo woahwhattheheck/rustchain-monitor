@@ -43,7 +43,7 @@ DEFAULT_STATE_FILE = ".epoch_state.json"
 DEFAULT_MOLTBOOK_URL = "https://moltbook.ai/api/v1"
 DEFAULT_OFFLINE_POLLS = 2
 DEFAULT_TIP_AGE_MAX = 100
-DEFAULT_BACKUP_AGE_HOURS = 6.0
+DEFAULT_BACKUP_AGE_MAX_HOURS = 6.0
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -523,7 +523,7 @@ def run_once(
     reward_min: float | None = None,
     reward_max: float | None = None,
     tip_age_max: int = DEFAULT_TIP_AGE_MAX,
-    backup_age_max_hours: float = DEFAULT_BACKUP_AGE_HOURS,
+    backup_age_max_hours: float = DEFAULT_BACKUP_AGE_MAX_HOURS,
 ) -> dict:
     """Run one poll cycle and return updated state."""
     state = normalize_state(state)
@@ -666,14 +666,14 @@ def main():
     telegram_token = first_non_none(args.telegram_token, os.environ.get("TELEGRAM_BOT_TOKEN"), config.get("telegram_bot_token"))
     telegram_chat_id = first_non_none(args.telegram_chat_id, os.environ.get("TELEGRAM_CHAT_ID"), config.get("telegram_chat_id"))
     moltbook_key = first_non_none(args.moltbook_key, os.environ.get("MOLTBOOK_API_KEY"), config.get("moltbook_api_key"))
-    moltbook_url = first_non_none(args.moltbook_url, os.environ.get("MOLTBOOK_API_URL"), config.get("moltbook_url"), DEFAULT_MOLTBOOK_URL)
+    moltbook_url = first_non_none(args.moltbook_url, os.environ.get("MOLTBOOK_API_URL"), config.get("moltbook_api_url"), DEFAULT_MOLTBOOK_URL)
     poll_interval = int(first_non_none(args.interval, _float_or_none(os.environ.get("POLL_INTERVAL")), config.get("poll_interval"), DEFAULT_INTERVAL))
     state_file = first_non_none(args.state_file, os.environ.get("STATE_FILE"), config.get("state_file"), DEFAULT_STATE_FILE)
     offline_polls = int(first_non_none(args.offline_polls, _float_or_none(os.environ.get("OFFLINE_POLLS")), config.get("offline_polls"), DEFAULT_OFFLINE_POLLS))
     reward_min = first_non_none(args.reward_min, _float_or_none(os.environ.get("REWARD_MIN")), _float_or_none(config.get("reward_min")))
     reward_max = first_non_none(args.reward_max, _float_or_none(os.environ.get("REWARD_MAX")), _float_or_none(config.get("reward_max")))
     tip_age_max = int(first_non_none(args.tip_age_max, _float_or_none(os.environ.get("HEALTH_TIP_AGE_MAX")), config.get("tip_age_max"), DEFAULT_TIP_AGE_MAX))
-    backup_age_max_hours = float(first_non_none(args.backup_age_max_hours, _float_or_none(os.environ.get("HEALTH_BACKUP_AGE_MAX")), config.get("backup_age_max_hours"), DEFAULT_BACKUP_AGE_HOURS))
+    backup_age_max_hours = float(first_non_none(args.backup_age_max_hours, _float_or_none(os.environ.get("HEALTH_BACKUP_AGE_MAX")), config.get("backup_age_max_hours"), DEFAULT_BACKUP_AGE_MAX_HOURS))
 
     print("RustChain Epoch Reporter starting...")
     print(f"Node: {node_url}")
