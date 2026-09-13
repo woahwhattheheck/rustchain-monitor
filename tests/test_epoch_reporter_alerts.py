@@ -83,6 +83,28 @@ def test_check_reward_alert_thresholds_and_deduping():
     assert okay is None
 
 
+def test_format_epoch_message_accepts_numeric_strings_for_distribution_total():
+    message = epoch_reporter.format_epoch_message(
+        {"epoch": 101, "epoch_pot": "1.5", "enrolled_miners": "2"},
+        [],
+        "https://node.example",
+    )
+
+    assert "Reward pot: 1.5 RTC" in message
+    assert "Enrolled miners: 2" in message
+    assert "Estimated RTC distributed: 3.0" in message
+
+
+def test_format_epoch_message_invalid_enrolled_count_does_not_raise():
+    message = epoch_reporter.format_epoch_message(
+        {"epoch": 102, "epoch_pot": 1.5, "enrolled_miners": "unknown"},
+        [],
+        "https://node.example",
+    )
+
+    assert "Estimated RTC distributed: N/A" in message
+
+
 def test_run_once_posts_epoch_summary_and_alerts(monkeypatch):
     sent_messages = []
     moltbook_posts = []
