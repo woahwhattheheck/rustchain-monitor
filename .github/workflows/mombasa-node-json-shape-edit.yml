@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: mombasa-node-shape-edit
+  cancel-in-progress: true
+
 jobs:
   patch-test-commit:
     runs-on: ubuntu-latest
@@ -25,23 +29,13 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
           source_path = Path("rustchain_monitor.py")
           text = source_path.read_text()
 
-          helper_anchor = '''def _health_db_rw(health: dict) -> bool:
-              if "db_rw" in health:
-                  return health.get("db_rw") is True
-              db_value = str(health.get("db", "") or "").strip().lower()
-              return db_value in {"rw", "read-write", "read_write", "readwrite"}
-
-
-          def record_history_snapshot(
-          '''
-          helper_replacement = '''def _health_db_rw(health: dict) -> bool:
-              if "db_rw" in health:
-                  return health.get("db_rw") is True
-              db_value = str(health.get("db", "") or "").strip().lower()
+          helper_anchor = '    return db_value in {"rw", "read-write", "read_write", "readwrite"}\n\n\ndef record_history_snapshot('
+          helper_insert = textwrap.dedent('''\
               return db_value in {"rw", "read-write", "read_write", "readwrite"}
 
 
@@ -57,76 +51,43 @@ jobs:
               return value
 
 
-          def record_history_snapshot(
-          '''
-
-          method_anchor = '''    def get_health(self) -> Dict:
-              """Check node health"""
-              response = self.session.get(f"{self.node_url}/health")
-              response.raise_for_status()
-              return response.json()
-              
-              def get_epoch(self) -> Dict:
-              """Get current epoch info"""
-              response = self.session.get(f"{self.node_url}/epoch")
-              response.raise_for_status()
-              return response.json()
-              
-              def get_miners(self) -> List[Dict]:
-              """Get all active miners"""
-              response = self.session.get(f"{self.node_url}/api/miners")
-              response.raise_for_status()
-              return response.json()
-              
-              def get_miner_balance(self, miner_id: str) -> float:
-              """Get specific miner's RTC balance"""
-              response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
-              response.raise_for_status()
-              balance = _coerce_float(response.json().get("balance_rtc", 0.0), None)
-              if balance is None:
-                  raise ValueError("balance_rtc must be a finite number")
-              return balance
-          '''
-
-          method_replacement = '''    def get_health(self) -> Dict:
-              """Check node health"""
-              response = self.session.get(f"{self.node_url}/health")
-              response.raise_for_status()
-              return _require_json_object(response.json(), "/health")
-              
-              def get_epoch(self) -> Dict:
-              """Get current epoch info"""
-              response = self.session.get(f"{self.node_url}/epoch")
-              response.raise_for_status()
-              return _require_json_object(response.json(), "/epoch")
-              
-              def get_miners(self) -> List[Dict]:
-              """Get all active miners"""
-              response = self.session.get(f"{self.node_url}/api/miners")
-              response.raise_for_status()
-              return _require_json_object_list(response.json(), "/api/miners")
-              
-              def get_miner_balance(self, miner_id: str) -> float:
-              """Get specific miner's RTC balance"""
-              response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
-              response.raise_for_status()
-              payload = _require_json_object(response.json(), "/wallet/balance")
-              balance = _coerce_float(payload.get("balance_rtc", 0.0), None)
-              if balance is None:
-                  raise ValueError("balance_rtc must be a finite number")
-              return balance
-          '''
-
+          def record_history_snapshot(''')
           if text.count(helper_anchor) != 1:
               raise SystemExit(f"helper anchor count={text.count(helper_anchor)}, expected 1")
-          if text.count(method_anchor) != 1:
-              raise SystemExit(f"method anchor count={text.count(method_anchor)}, expected 1")
-          text = text.replace(helper_anchor, helper_replacement)
-          text = text.replace(method_anchor, method_replacement)
+          text = text.replace(helper_anchor, helper_insert, 1)
+
+          raw_return = '        return response.json()\n'
+          if text.count(raw_return) != 3:
+              raise SystemExit(f"raw JSON return count={text.count(raw_return)}, expected 3")
+          text = text.replace(
+              raw_return,
+              '        return _require_json_object(response.json(), "/health")\n',
+              1,
+          )
+          text = text.replace(
+              raw_return,
+              '        return _require_json_object(response.json(), "/epoch")\n',
+              1,
+          )
+          text = text.replace(
+              raw_return,
+              '        return _require_json_object_list(response.json(), "/api/miners")\n',
+              1,
+          )
+
+          balance_anchor = '        balance = _coerce_float(response.json().get("balance_rtc", 0.0), None)\n'
+          balance_replacement = (
+              '        payload = _require_json_object(response.json(), "/wallet/balance")\n'
+              '        balance = _coerce_float(payload.get("balance_rtc", 0.0), None)\n'
+          )
+          if text.count(balance_anchor) != 1:
+              raise SystemExit(f"balance anchor count={text.count(balance_anchor)}, expected 1")
+          text = text.replace(balance_anchor, balance_replacement, 1)
           source_path.write_text(text)
 
           test_path = Path("tests/test_rustchain_monitor_json_shapes.py")
-          test_path.write_text('''import unittest
+          test_path.write_text(textwrap.dedent('''\
+          import unittest
           from unittest import mock
 
           import rustchain_monitor
@@ -165,7 +126,8 @@ jobs:
                   self.assertEqual(self.monitor_for({"epoch": 7}).get_epoch(), {"epoch": 7})
 
               def test_miners_requires_list_of_objects(self):
-                  for payload in ({}, None, "miners", 7, True, [None], [1], [{}, "bad"]):
+                  invalid = ({}, None, "miners", 7, True, [None], [1], [{}, "bad"])
+                  for payload in invalid:
                       with self.subTest(payload=payload):
                           with self.assertRaisesRegex(ValueError, "expected list of objects"):
                               self.monitor_for(payload).get_miners()
@@ -211,7 +173,7 @@ jobs:
 
           if __name__ == "__main__":
               unittest.main()
-          ''')
+          '''))
           PY
       - name: Install test dependencies
         run: |
