@@ -137,6 +137,10 @@ def _health_db_rw(health_data: dict) -> bool:
 
 
 def health_problems(health_data: dict | None, *, tip_age_max: int, backup_age_max_hours: float) -> list[str]:
+    if health_data is None:
+        return ["health endpoint unavailable"]
+    if not isinstance(health_data, dict):
+        return ["health endpoint returned invalid payload"]
     if not health_data:
         return ["health endpoint unavailable"]
 
@@ -226,7 +230,7 @@ def format_recovery_alert(miner_id: str, miner: dict) -> str:
 
 def format_health_alert(node_url: str, problems: list[str], health_data: dict | None, *, recovered: bool = False) -> str:
     if recovered:
-        version = (health_data or {}).get("version", "unknown")
+        version = health_data.get("version", "unknown") if isinstance(health_data, dict) else "unknown"
         return f"Network health recovered\nNode: {node_url}\nVersion: {version}"
 
     lines = [
@@ -234,7 +238,7 @@ def format_health_alert(node_url: str, problems: list[str], health_data: dict | 
         f"Node: {node_url}",
         f"Problems: {', '.join(problems)}",
     ]
-    if health_data:
+    if isinstance(health_data, dict):
         lines.append(f"Version: {health_data.get('version', 'unknown')}")
         lines.append(f"Tip age: {health_data.get('tip_age_slots', 'n/a')}")
         lines.append(f"Backup age hours: {health_data.get('backup_age_hours', 'n/a')}")
