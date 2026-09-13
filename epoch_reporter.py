@@ -59,12 +59,33 @@ def default_state() -> dict:
     }
 
 
+def _normalize_tracked_miner_state(info) -> dict | None:
+    if not isinstance(info, dict):
+        return None
+
+    normalized = dict(info)
+    try:
+        missed_polls = int(normalized.get("missed_polls", 0))
+    except (OverflowError, TypeError, ValueError):
+        missed_polls = 0
+    normalized["missed_polls"] = max(0, missed_polls)
+    return normalized
+
+
 def normalize_state(state: dict | None) -> dict:
     merged = default_state()
     if isinstance(state, dict):
         merged.update(state)
-    if not isinstance(merged.get("tracked_miners"), dict):
+
+    tracked = merged.get("tracked_miners")
+    if not isinstance(tracked, dict):
         merged["tracked_miners"] = {}
+    else:
+        merged["tracked_miners"] = {
+            miner_id: normalized
+            for miner_id, info in tracked.items()
+            if (normalized := _normalize_tracked_miner_state(info)) is not None
+        }
     return merged
 
 
