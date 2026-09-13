@@ -86,6 +86,22 @@ def test_health_payload_rejects_truthy_string_booleans():
     assert "database is not read-write" in problems
 
 
+def test_health_payload_rejects_non_mapping_shapes_without_crashing():
+    for payload in (["not", "a", "mapping"], "not-a-mapping", 1):
+        state = epoch_reporter.default_state()
+        messages = epoch_reporter.update_health_state(
+            state,
+            payload,
+            node_url="https://node.example",
+            tip_age_max=100,
+            backup_age_max_hours=6.0,
+        )
+
+        assert state["last_health_ok"] is False
+        assert len(messages) == 1
+        assert "health endpoint returned invalid payload" in messages[0]
+
+
 def test_health_payload_rejects_nonfinite_threshold_values():
     problems = epoch_reporter.health_problems(
         {
