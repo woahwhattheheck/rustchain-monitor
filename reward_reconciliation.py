@@ -10,7 +10,7 @@ import math
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
+import stat
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -19,11 +19,14 @@ from typing import Any, Mapping, Sequence
 SOURCE_SCHEMA = "rustchain.reward-observations/v1"
 REPORT_SCHEMA = "rustchain.reward-reconciliation/v1"
 RECEIPT_SCHEMA = "rustchain.reward-reconciliation-receipt/v1"
-UTC_SECOND_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
-MINER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
+UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
+MINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-OBSERVATION_KEYS = frozenset({"observed_at", "epoch", "balance_rtc"})
-SOURCE_KEYS = frozenset({"schema_version", "miner_id", "observations"})
+SOURCE_KEYS = {"schema_version", "miner_id", "observations"}
+OBS_KEYS = {"observed_at", "epoch", "balance_rtc"}
+MAX_DECIMAL_DIGITS = 256
+MAX_DECIMAL_EXPONENT = 128
+MAX_EPOCH = (1 << 63) - 1
 AUTHORITY = {
     "payout_owed": False,
     "expected_reward_inferred": False,
@@ -38,27 +41,26 @@ AUTHORITY = {
 
 
 class ReconciliationError(ValueError):
-    """Raised when source or artifact evidence is malformed or ambiguous."""
+    """Malformed, ambiguous, or unsafe reconciliation evidence."""
 
 
-def _duplicate_key_guard(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
+def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for key, value in pairs:
-        if key in result:
+        if key in out:
             raise ReconciliationError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
+        out[key] = value
+    return out
 
 
 def load_json_strict(path: str | Path) -> Any:
-    """Load JSON while rejecting duplicate keys and non-finite numeric constants."""
     def reject_constant(value: str) -> None:
         raise ReconciliationError(f"non-finite JSON number is forbidden: {value}")
 
-    with open(Path(path), "r", encoding="utf-8") as handle:
+    with open(Path(path), encoding="utf-8") as handle:
         return json.load(
             handle,
-            object_pairs_hook=_duplicate_key_guard,
+            object_pairs_hook=_object,
             parse_float=Decimal,
             parse_int=int,
             parse_constant=reject_constant,
@@ -68,76 +70,119 @@ def load_json_strict(path: str | Path) -> Any:
 def _decimal(value: Any, field: str) -> Decimal:
     if isinstance(value, bool) or value is None:
         raise ReconciliationError(f"{field} must be a finite decimal, not boolean/null")
-    if isinstance(value, Decimal):
-        parsed = value
-    elif type(value) is int:
-        parsed = Decimal(value)
-    elif type(value) is float:
-        if not math.isfinite(value):
-            raise ReconciliationError(f"{field} must be finite")
-        parsed = Decimal(str(value))
-    elif type(value) is str:
-        if not value or value.strip() != value:
-            raise ReconciliationError(f"{field} decimal string must not contain surrounding whitespace")
-        try:
-            parsed = Decimal(value)
-        except InvalidOperation as exc:
-            raise ReconciliationError(f"{field} must be a decimal") from exc
-    else:
-        raise ReconciliationError(f"{field} must be a decimal-compatible scalar")
-    if not parsed.is_finite():
+    try:
+        if isinstance(value, Decimal):
+            out = value
+        elif type(value) is int:
+            out = Decimal(value)
+        elif type(value) is float:
+            if not math.isfinite(value):
+                raise ReconciliationError(f"{field} must be finite")
+            out = Decimal(str(value))
+        elif type(value) is str and value and value.strip() == value:
+            out = Decimal(value)
+        else:
+            raise ReconciliationError(f"{field} must be a decimal-compatible scalar")
+    except InvalidOperation as exc:
+        raise ReconciliationError(f"{field} must be a decimal") from exc
+    if not out.is_finite():
         raise ReconciliationError(f"{field} must be finite")
-    return parsed
+    tup = out.as_tuple()
+    if len(tup.digits) > MAX_DECIMAL_DIGITS or abs(tup.exponent) > MAX_DECIMAL_EXPONENT:
+        raise ReconciliationError(f"{field} exceeds decimal precision/exponent safety bounds")
+    if out and abs(out.adjusted()) > MAX_DECIMAL_EXPONENT:
+        raise ReconciliationError(f"{field} exceeds decimal magnitude safety bounds")
+    return out
 
 
-def _canonical_decimal(value: Decimal) -> str:
+def _dec(value: Decimal) -> str:
     if not value.is_finite():
         raise ReconciliationError("cannot canonicalize non-finite decimal")
-    if value == 0:
+    if not value:
         return "0"
-    normalized = value.normalize()
-    rendered = format(normalized, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    rendered = format(value.normalize(), "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
-def _strict_int(value: Any, field: str) -> int:
+def _epoch(value: Any, field: str) -> int:
     if type(value) is not int:
         raise ReconciliationError(f"{field} must be an integer")
     if value < 0:
         raise ReconciliationError(f"{field} must be >= 0")
+    if value > MAX_EPOCH:
+        raise ReconciliationError(f"{field} exceeds supported epoch range")
     return value
 
 
-def _utc_second(value: Any, field: str) -> tuple[str, datetime]:
-    if type(value) is not str or not UTC_SECOND_RE.fullmatch(value):
-        raise ReconciliationError(
-            f"{field} must be UTC in YYYY-MM-DDTHH:MM:SS[.ffffff]Z form"
-        )
+def _utc(value: Any, field: str) -> tuple[str, datetime]:
+    if type(value) is not str or not UTC_RE.fullmatch(value):
+        raise ReconciliationError(f"{field} must be UTC in YYYY-MM-DDTHH:MM:SS[.ffffff]Z form")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00").astimezone(timezone.utc)
+        dt = datetime.fromisoformat(value[:-1] + "+00:00").astimezone(timezone.utc)
     except ValueError as exc:
         raise ReconciliationError(f"{field} is not a valid UTC timestamp") from exc
-    if parsed.microsecond:
-        fraction = f"{parsed.microsecond:06d}".rstrip("0")
-        canonical = parsed.strftime("%Y-%m-%dT%H:%M:%S") + f".{fraction}Z"
-    else:
-        canonical = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return canonical, parsed
+    base = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    if dt.microsecond:
+        base += "." + f"{dt.microsecond:06d}".rstrip("0")
+    return base + "Z", dt
+
+
+def normalize_source(source: Mapping[str, Any]) -> dict[str, Any]:
+    if type(source) is not dict:
+        raise ReconciliationError("source must be a JSON object")
+    if set(source) != SOURCE_KEYS:
+        raise ReconciliationError(
+            f"source keys mismatch; missing={sorted(SOURCE_KEYS - set(source))}, "
+            f"unknown={sorted(set(source) - SOURCE_KEYS)}"
+        )
+    if source["schema_version"] != SOURCE_SCHEMA:
+        raise ReconciliationError(f"schema_version must equal {SOURCE_SCHEMA}")
+    miner_id = source["miner_id"]
+    if type(miner_id) is not str or not MINER_RE.fullmatch(miner_id):
+        raise ReconciliationError("miner_id is malformed")
+    rows = source["observations"]
+    if type(rows) is not list or len(rows) < 2:
+        raise ReconciliationError("observations must be a list with at least two entries")
+    if len(rows) > 100_000:
+        raise ReconciliationError("observations exceeds 100000-entry safety bound")
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    prior: datetime | None = None
+    for index, row in enumerate(rows):
+        if type(row) is not dict or set(row) != OBS_KEYS:
+            keys = set(row) if type(row) is dict else set()
+            raise ReconciliationError(
+                f"observations[{index}] keys mismatch; missing={sorted(OBS_KEYS - keys)}, "
+                f"unknown={sorted(keys - OBS_KEYS)}"
+            )
+        observed_at, dt = _utc(row["observed_at"], f"observations[{index}].observed_at")
+        if observed_at in seen:
+            raise ReconciliationError(f"duplicate observation time: {observed_at}")
+        if prior is not None and dt <= prior:
+            raise ReconciliationError("observations must be in strictly increasing UTC order")
+        balance = _decimal(row["balance_rtc"], f"observations[{index}].balance_rtc")
+        if balance < 0:
+            raise ReconciliationError(f"observations[{index}].balance_rtc must be >= 0")
+        normalized.append({
+            "observed_at": observed_at,
+            "epoch": _epoch(row["epoch"], f"observations[{index}].epoch"),
+            "balance_rtc": _dec(balance),
+        })
+        seen.add(observed_at)
+        prior = dt
+    return {"schema_version": SOURCE_SCHEMA, "miner_id": miner_id, "observations": normalized}
 
 
 def source_from_history_db(db_path: str | Path, miner_id: str) -> dict[str, Any]:
-    """Build strict reconciliation source evidence from the monitor's existing SQLite history DB."""
-    if type(miner_id) is not str or not MINER_ID_RE.fullmatch(miner_id):
+    """Read the monitor's existing miner_history table without write authority."""
+    if type(miner_id) is not str or not MINER_RE.fullmatch(miner_id):
         raise ReconciliationError("miner_id is malformed")
-    db_file = Path(db_path).expanduser().absolute()
-    if db_file.is_symlink() or not db_file.is_file():
+    db = Path(db_path).expanduser().absolute()
+    if db.is_symlink() or not db.is_file():
         raise ReconciliationError("history DB must be an existing regular, non-symlink file")
-
-    uri = f"file:{db_file.as_posix()}?mode=ro"
     try:
-        conn = sqlite3.connect(uri, uri=True)
+        conn = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error as exc:
         raise ReconciliationError(f"cannot open history DB read-only: {exc}") from exc
     conn.row_factory = sqlite3.Row
@@ -149,199 +194,96 @@ def source_from_history_db(db_path: str | Path, miner_id: str) -> dict[str, Any]
                 f"miner_history schema missing required columns: {sorted(required - columns)}"
             )
         rows = conn.execute(
-            """
-            SELECT id, miner_id, observed_at, epoch, balance_rtc
-            FROM miner_history
-            WHERE miner_id = ?
-            ORDER BY observed_at ASC, id ASC
-            """,
+            "SELECT id, miner_id, observed_at, epoch, balance_rtc FROM miner_history "
+            "WHERE miner_id = ? ORDER BY observed_at ASC, id ASC",
             (miner_id,),
         ).fetchall()
     except sqlite3.Error as exc:
         raise ReconciliationError(f"cannot read miner_history: {exc}") from exc
     finally:
         conn.close()
-
     if len(rows) < 2:
         raise ReconciliationError("history DB needs at least two snapshots for the requested miner")
 
     observations = []
-    for index, item in enumerate(rows):
-        if item["epoch"] is None:
+    for index, row in enumerate(rows):
+        if row["epoch"] is None:
             raise ReconciliationError(f"history row {index} has no epoch")
-        epoch = _strict_int(item["epoch"], f"history[{index}].epoch")
-        observed = _decimal(item["observed_at"], f"history[{index}].observed_at")
+        timestamp = _decimal(row["observed_at"], f"history[{index}].observed_at")
         try:
-            observed_dt = datetime.fromtimestamp(float(observed), timezone.utc)
+            dt = datetime.fromtimestamp(float(timestamp), timezone.utc)
         except (OverflowError, OSError, ValueError) as exc:
             raise ReconciliationError(f"history[{index}].observed_at is outside UTC range") from exc
-        if observed_dt.microsecond:
-            fraction = f"{observed_dt.microsecond:06d}".rstrip("0")
-            observed_at = observed_dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{fraction}Z"
-        else:
-            observed_at = observed_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        balance = _decimal(item["balance_rtc"], f"history[{index}].balance_rtc")
+        observed_at = dt.strftime("%Y-%m-%dT%H:%M:%S")
+        if dt.microsecond:
+            observed_at += "." + f"{dt.microsecond:06d}".rstrip("0")
+        balance = _decimal(row["balance_rtc"], f"history[{index}].balance_rtc")
         observations.append({
-            "observed_at": observed_at,
-            "epoch": epoch,
-            "balance_rtc": _canonical_decimal(balance),
+            "observed_at": observed_at + "Z",
+            "epoch": _epoch(row["epoch"], f"history[{index}].epoch"),
+            "balance_rtc": _dec(balance),
         })
-
-    return normalize_source({
-        "schema_version": SOURCE_SCHEMA,
-        "miner_id": miner_id,
-        "observations": observations,
-    })
+    return normalize_source({"schema_version": SOURCE_SCHEMA, "miner_id": miner_id, "observations": observations})
 
 
-def _canonical_json_bytes(value: Any) -> bytes:
-    def convert(item: Any) -> Any:
+def _json_bytes(value: Any) -> bytes:
+    def ready(item: Any) -> Any:
         if isinstance(item, Decimal):
-            return _canonical_decimal(item)
+            return _dec(item)
         if isinstance(item, dict):
-            return {key: convert(val) for key, val in item.items()}
+            return {k: ready(v) for k, v in item.items()}
         if isinstance(item, list):
-            return [convert(val) for val in item]
+            return [ready(v) for v in item]
         return item
-
-    return json.dumps(
-        convert(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+    return json.dumps(ready(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
-def _sha256(value: Any) -> str:
-    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+def _sha(value: Any) -> str:
+    return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
-@dataclass(frozen=True)
-class Observation:
-    observed_at: str
-    observed_dt: datetime
-    epoch: int
-    balance: Decimal
-
-    def canonical(self) -> dict[str, Any]:
-        return {
-            "observed_at": self.observed_at,
-            "epoch": self.epoch,
-            "balance_rtc": _canonical_decimal(self.balance),
-        }
-
-
-def normalize_source(source: Mapping[str, Any]) -> dict[str, Any]:
-    if type(source) is not dict:
-        raise ReconciliationError("source must be a JSON object")
-    if frozenset(source) != SOURCE_KEYS:
-        unknown = sorted(set(source) - SOURCE_KEYS)
-        missing = sorted(SOURCE_KEYS - set(source))
-        raise ReconciliationError(f"source keys mismatch; missing={missing}, unknown={unknown}")
-    if source.get("schema_version") != SOURCE_SCHEMA:
-        raise ReconciliationError(f"schema_version must equal {SOURCE_SCHEMA}")
-
-    miner_id = source.get("miner_id")
-    if type(miner_id) is not str or not MINER_ID_RE.fullmatch(miner_id):
-        raise ReconciliationError("miner_id is malformed")
-
-    raw_observations = source.get("observations")
-    if type(raw_observations) is not list or len(raw_observations) < 2:
-        raise ReconciliationError("observations must be a list with at least two entries")
-    if len(raw_observations) > 100_000:
-        raise ReconciliationError("observations exceeds 100000-entry safety bound")
-
-    observations: list[Observation] = []
-    seen_times: set[str] = set()
-    prior_dt: datetime | None = None
-    for index, raw in enumerate(raw_observations):
-        if type(raw) is not dict:
-            raise ReconciliationError(f"observations[{index}] must be an object")
-        if frozenset(raw) != OBSERVATION_KEYS:
-            unknown = sorted(set(raw) - OBSERVATION_KEYS)
-            missing = sorted(OBSERVATION_KEYS - set(raw))
-            raise ReconciliationError(
-                f"observations[{index}] keys mismatch; missing={missing}, unknown={unknown}"
-            )
-        observed_at, observed_dt = _utc_second(raw["observed_at"], f"observations[{index}].observed_at")
-        if observed_at in seen_times:
-            raise ReconciliationError(f"duplicate observation time: {observed_at}")
-        if prior_dt is not None and observed_dt <= prior_dt:
-            raise ReconciliationError("observations must be in strictly increasing UTC order")
-        epoch = _strict_int(raw["epoch"], f"observations[{index}].epoch")
-        balance = _decimal(raw["balance_rtc"], f"observations[{index}].balance_rtc")
-        if balance < 0:
-            raise ReconciliationError(f"observations[{index}].balance_rtc must be >= 0")
-        observations.append(Observation(observed_at, observed_dt, epoch, balance))
-        seen_times.add(observed_at)
-        prior_dt = observed_dt
-
-    return {
-        "schema_version": SOURCE_SCHEMA,
-        "miner_id": miner_id,
-        "observations": [item.canonical() for item in observations],
-    }
-
-
-def _classify_transition(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
-    previous_epoch = int(previous["epoch"])
-    current_epoch = int(current["epoch"])
-    previous_balance = Decimal(str(previous["balance_rtc"]))
-    current_balance = Decimal(str(current["balance_rtc"]))
-    epoch_delta = current_epoch - previous_epoch
-    balance_delta = current_balance - previous_balance
-
+def _transition(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
+    pe, ce = int(previous["epoch"]), int(current["epoch"])
+    pb, cb = Decimal(str(previous["balance_rtc"])), Decimal(str(current["balance_rtc"]))
+    ed, bd = ce - pe, cb - pb
     signals: list[str] = []
     severity = "INFO"
-
-    if epoch_delta < 0:
+    if ed < 0:
         signals.append("EPOCH_REGRESSION")
         severity = "ANOMALY"
-    if balance_delta < 0:
+    if bd < 0:
         signals.append("BALANCE_REGRESSION")
         severity = "ANOMALY"
-
-    if epoch_delta == 0:
-        if balance_delta == 0:
-            signals.append("SAME_EPOCH_STABLE")
-        else:
-            signals.append("SAME_EPOCH_BALANCE_CONFLICT")
+    if ed == 0:
+        signals.append("SAME_EPOCH_STABLE" if bd == 0 else "SAME_EPOCH_BALANCE_CONFLICT")
+        if bd != 0:
             severity = "ANOMALY"
-    elif epoch_delta > 0:
-        if epoch_delta > 1:
+    elif ed > 0:
+        if ed > 1:
             signals.append("OBSERVATION_GAP")
             if severity != "ANOMALY":
                 severity = "CAUTION"
-        if balance_delta == 0:
+        if bd == 0:
             signals.append("EPOCH_ADVANCE_NO_OBSERVED_GAIN")
             if severity != "ANOMALY":
                 severity = "CAUTION"
-        elif balance_delta > 0:
+        elif bd > 0:
             signals.append("POSITIVE_OBSERVED_GAIN")
     if not signals:
         signals.append("UNCLASSIFIED_TRANSITION")
         severity = "CAUTION"
-
     return {
-        "from_observed_at": previous["observed_at"],
-        "to_observed_at": current["observed_at"],
-        "from_epoch": previous_epoch,
-        "to_epoch": current_epoch,
-        "epoch_delta": epoch_delta,
-        "from_balance_rtc": _canonical_decimal(previous_balance),
-        "to_balance_rtc": _canonical_decimal(current_balance),
-        "balance_delta_rtc": _canonical_decimal(balance_delta),
-        "severity": severity,
-        "signals": signals,
+        "from_observed_at": previous["observed_at"], "to_observed_at": current["observed_at"],
+        "from_epoch": pe, "to_epoch": ce, "epoch_delta": ed,
+        "from_balance_rtc": _dec(pb), "to_balance_rtc": _dec(cb),
+        "balance_delta_rtc": _dec(bd), "severity": severity, "signals": signals,
     }
 
 
-def _render_markdown(report: Mapping[str, Any]) -> str:
+def _markdown(report: Mapping[str, Any]) -> str:
     summary = report["summary"]
     lines = [
-        "# RustChain reward reconciliation",
-        "",
+        "# RustChain reward reconciliation", "",
         f"- Miner: `{report['miner_id']}`",
         f"- Source observations: {report['observation_count']}",
         f"- Source SHA-256: `{report['source_sha256']}`",
@@ -349,75 +291,56 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- Transitions: {summary['transition_count']}",
         f"- Anomaly transitions: {summary['anomaly_transition_count']}",
         f"- Caution transitions: {summary['caution_transition_count']}",
-        f"- Informational transitions: {summary['info_transition_count']}",
-        "",
-        "## Transition evidence",
-        "",
+        f"- Informational transitions: {summary['info_transition_count']}", "",
+        "## Transition evidence", "",
         "| From epoch | To epoch | Δ epoch | Δ RTC | Severity | Signals |",
         "| ---: | ---: | ---: | ---: | --- | --- |",
     ]
-    for transition in report["transitions"]:
-        signal_text = ", ".join(transition["signals"])
+    for item in report["transitions"]:
         lines.append(
-            f"| {transition['from_epoch']} | {transition['to_epoch']} | "
-            f"{transition['epoch_delta']} | {transition['balance_delta_rtc']} | "
-            f"{transition['severity']} | {signal_text} |"
+            f"| {item['from_epoch']} | {item['to_epoch']} | {item['epoch_delta']} | "
+            f"{item['balance_delta_rtc']} | {item['severity']} | {', '.join(item['signals'])} |"
         )
-    lines.extend(
-        [
-            "",
-            "## Authority boundary",
-            "",
-            "This artifact is diagnostic evidence only. It does not infer an expected reward rate, "
-            "assert that any payout is owed, contact any party, mutate a node or wallet, submit a "
-            "bounty, transfer RTC, or recognize revenue.",
-            "",
-        ]
-    )
+    lines += [
+        "", "## Authority boundary", "",
+        "This artifact is diagnostic evidence only. It does not infer an expected reward rate, "
+        "assert that any payout is owed, contact any party, mutate a node or wallet, submit a "
+        "bounty, transfer RTC, or recognize revenue.", "",
+    ]
     return "\n".join(lines)
 
 
 def compile_reconciliation(source: Mapping[str, Any]) -> dict[str, Any]:
     normalized = normalize_source(source)
-    observations = normalized["observations"]
-    transitions = [
-        _classify_transition(observations[index - 1], observations[index])
-        for index in range(1, len(observations))
-    ]
+    rows = normalized["observations"]
+    transitions = [_transition(rows[i - 1], rows[i]) for i in range(1, len(rows))]
+    signals = sorted({signal for item in transitions for signal in item["signals"]})
     summary = {
         "transition_count": len(transitions),
-        "anomaly_transition_count": sum(item["severity"] == "ANOMALY" for item in transitions),
-        "caution_transition_count": sum(item["severity"] == "CAUTION" for item in transitions),
-        "info_transition_count": sum(item["severity"] == "INFO" for item in transitions),
-        "signal_counts": {
-            signal: sum(signal in item["signals"] for item in transitions)
-            for signal in sorted({signal for item in transitions for signal in item["signals"]})
-        },
+        "anomaly_transition_count": sum(x["severity"] == "ANOMALY" for x in transitions),
+        "caution_transition_count": sum(x["severity"] == "CAUTION" for x in transitions),
+        "info_transition_count": sum(x["severity"] == "INFO" for x in transitions),
+        "signal_counts": {s: sum(s in x["signals"] for x in transitions) for s in signals},
     }
     report = {
-        "schema_version": REPORT_SCHEMA,
-        "miner_id": normalized["miner_id"],
-        "source_schema_version": SOURCE_SCHEMA,
-        "source_sha256": _sha256(normalized),
-        "observation_count": len(observations),
-        "first_observed_at": observations[0]["observed_at"],
-        "last_observed_at": observations[-1]["observed_at"],
-        "summary": summary,
-        "transitions": transitions,
-        "authority": dict(AUTHORITY),
+        "schema_version": REPORT_SCHEMA, "miner_id": normalized["miner_id"],
+        "source_schema_version": SOURCE_SCHEMA, "source_sha256": _sha(normalized),
+        "observation_count": len(rows), "first_observed_at": rows[0]["observed_at"],
+        "last_observed_at": rows[-1]["observed_at"], "summary": summary,
+        "transitions": transitions, "authority": dict(AUTHORITY),
     }
-    markdown = _render_markdown(report)
+    markdown = _markdown(report)
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "source_sha256": report["source_sha256"],
-        "report_sha256": _sha256(report),
-        "markdown_sha256": hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+        "report_sha256": _sha(report),
+        "markdown_sha256": hashlib.sha256(markdown.encode()).hexdigest(),
     }
     return {"report": report, "markdown": markdown, "receipt": receipt}
 
 
 def verify_reconciliation(source: Mapping[str, Any], artifact: Mapping[str, Any]) -> bool:
-    if type(artifact) is not dict or frozenset(artifact) != {"report", "markdown", "receipt"}:
+    if type(artifact) is not dict or set(artifact) != {"report", "markdown", "receipt"}:
         return False
     try:
         expected = compile_reconciliation(source)
@@ -426,40 +349,39 @@ def verify_reconciliation(source: Mapping[str, Any], artifact: Mapping[str, Any]
     if artifact != expected:
         return False
     receipt = artifact.get("receipt")
-    if type(receipt) is not dict or frozenset(receipt) != {
-        "schema_version", "source_sha256", "report_sha256", "markdown_sha256"
-    }:
+    if type(receipt) is not dict or set(receipt) != {"schema_version", "source_sha256", "report_sha256", "markdown_sha256"}:
         return False
-    return (
-        receipt.get("schema_version") == RECEIPT_SCHEMA
-        and type(receipt.get("source_sha256")) is str
-        and type(receipt.get("report_sha256")) is str
-        and type(receipt.get("markdown_sha256")) is str
-        and HEX64_RE.fullmatch(receipt["source_sha256"]) is not None
-        and HEX64_RE.fullmatch(receipt["report_sha256"]) is not None
-        and HEX64_RE.fullmatch(receipt["markdown_sha256"]) is not None
+    return receipt.get("schema_version") == RECEIPT_SCHEMA and all(
+        type(receipt.get(key)) is str and HEX64_RE.fullmatch(receipt[key]) is not None
+        for key in ("source_sha256", "report_sha256", "markdown_sha256")
     )
 
 
-def _json_ready(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return _canonical_decimal(value)
-    if isinstance(value, dict):
-        return {key: _json_ready(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_json_ready(item) for item in value]
-    return value
+def _plain_output(path: str | Path) -> Path:
+    target = Path(path).expanduser().absolute()
+    parent = target.parent
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    current = Path(parent.anchor)
+    for part in (parent.parts[1:] if parent.anchor else parent.parts):
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            current.mkdir()
+            info = current.lstat()
+        attrs = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or (reparse and attrs & reparse):
+            raise ReconciliationError(f"output parent must not traverse links: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise ReconciliationError(f"output parent component is not a directory: {current}")
+    return target
 
 
-def _create_exclusive_text(path: str | Path, content: str) -> None:
-    target = Path(path).expanduser()
+def _write_new(path: str | Path, content: str) -> None:
+    target = _plain_output(path)
     if target.exists() or target.is_symlink():
         raise ReconciliationError(f"refusing to overwrite output path: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.parent.is_symlink():
-        raise ReconciliationError(f"output parent must not be a symlink: {target.parent}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(target, flags, 0o600)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
@@ -472,43 +394,36 @@ def _create_exclusive_text(path: str | Path, content: str) -> None:
 
 
 def _artifact_json(artifact: Mapping[str, Any]) -> str:
-    return json.dumps(_json_ready(artifact), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    return json.dumps(artifact, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    compile_parser = subparsers.add_parser("compile", help="compile a deterministic reconciliation artifact")
-    compile_parser.add_argument("source", help="strict reward-observation JSON")
-    compile_parser.add_argument("--json-out", required=True, help="create-exclusive artifact JSON path")
-    compile_parser.add_argument("--markdown-out", required=True, help="create-exclusive Markdown path")
-    history_parser = subparsers.add_parser(
-        "compile-history", help="compile directly from the monitor's read-only SQLite history DB"
-    )
-    history_parser.add_argument("history_db", help="existing monitor history.db")
-    history_parser.add_argument("--miner-id", required=True, help="exact miner identity")
-    history_parser.add_argument("--json-out", required=True, help="create-exclusive artifact JSON path")
-    history_parser.add_argument("--markdown-out", required=True, help="create-exclusive Markdown path")
-    verify_parser = subparsers.add_parser("verify", help="fully recompile and verify an artifact")
-    verify_parser.add_argument("source", help="strict reward-observation JSON")
-    verify_parser.add_argument("artifact", help="compiled artifact JSON")
+    sub = parser.add_subparsers(dest="command", required=True)
+    compile_p = sub.add_parser("compile")
+    compile_p.add_argument("source")
+    history_p = sub.add_parser("compile-history")
+    history_p.add_argument("history_db")
+    history_p.add_argument("--miner-id", required=True)
+    for item in (compile_p, history_p):
+        item.add_argument("--json-out", required=True)
+        item.add_argument("--markdown-out", required=True)
+    verify_p = sub.add_parser("verify")
+    verify_p.add_argument("source")
+    verify_p.add_argument("artifact")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = _parser().parse_args(argv)
     try:
-        if args.command == "compile-history":
-            source = source_from_history_db(args.history_db, args.miner_id)
-        else:
-            source = load_json_strict(args.source)
+        source = source_from_history_db(args.history_db, args.miner_id) if args.command == "compile-history" else load_json_strict(args.source)
         if args.command in {"compile", "compile-history"}:
             artifact = compile_reconciliation(source)
-            _create_exclusive_text(args.json_out, _artifact_json(artifact))
-            _create_exclusive_text(args.markdown_out, artifact["markdown"])
+            _write_new(args.json_out, _artifact_json(artifact))
+            _write_new(args.markdown_out, artifact["markdown"])
             print(json.dumps({
-                "ok": True,
-                "miner_id": artifact["report"]["miner_id"],
+                "ok": True, "miner_id": artifact["report"]["miner_id"],
                 "source_sha256": artifact["report"]["source_sha256"],
                 "report_sha256": artifact["receipt"]["report_sha256"],
             }, sort_keys=True))
