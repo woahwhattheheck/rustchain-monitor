@@ -128,6 +128,11 @@ def _record_list_or_none(value) -> list[dict] | None:
         return None
     if any(not isinstance(item, dict) for item in value):
         return None
+    for item in value:
+        for field in ("miner", "miner_id"):
+            identity = item.get(field)
+            if identity not in (None, "") and not isinstance(identity, str):
+                return None
     return value
 
 
