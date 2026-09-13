@@ -205,9 +205,9 @@ def _sanitize_json_numbers(value):
 
 def _health_db_rw(health: dict) -> bool:
     if "db_rw" in health:
-        return bool(health.get("db_rw"))
-    db_value = str(health.get("db", "") or "").lower()
-    return "rw" in db_value
+        return health.get("db_rw") is True
+    db_value = str(health.get("db", "") or "").strip().lower()
+    return db_value in {"rw", "read-write", "read_write", "readwrite"}
 
 
 def record_history_snapshot(
@@ -796,7 +796,6 @@ def _history_summary_table(history_summaries: Optional[list[dict]] = None) -> Op
             row["snapshots"],
             row["latest_balance"],
             row["latest_epoch"],
-            row["latest_arch"],
             1 if row["latest_active"] else 0,
             row["daily_gain_1d"],
             row["daily_gain_7d"],
@@ -815,7 +814,6 @@ def _history_summary_table(history_summaries: Optional[list[dict]] = None) -> Op
             {"text": "snapshots"},
             {"text": "latest_balance"},
             {"text": "latest_epoch"},
-            {"text": "latest_arch"},
             {"text": "latest_active"},
             {"text": "gain_1d_rtc"},
             {"text": "gain_7d_rtc"},
@@ -1134,7 +1132,7 @@ class RustChainMonitor:
 
         epoch_current = epoch.get("current_epoch", epoch.get("epoch"))
         summary = {
-            "node_ok": bool(health.get("ok")),
+            "node_ok": health.get("ok") is True,
             "version": health.get("version", "unknown") or "unknown",
             "epoch_current": _coerce_int(epoch_current, None),
             "active_miners": len(miners) if isinstance(miners, list) else _coerce_int((miners or {}).get("count"), 0),
