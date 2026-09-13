@@ -12,6 +12,7 @@ import json
 import hashlib
 import subprocess
 import argparse
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -94,30 +95,29 @@ class BackupVerifier:
         """Test backup restoration procedure"""
         print("\nTesting restoration procedure...")
         
-        # Create temp directory for test restore
-        temp_dir = self.backup_path.parent / "test_restore"
-        temp_dir.mkdir(exist_ok=True)
-        
         try:
-            # Copy files to temp for restoration test
-            for file in self.backup_path.glob("*"):
-                if file.is_file():
-                    dest = temp_dir / file.name
-                    dest.write_bytes(file.read_bytes())
-                    print(f"✓ Restored {file.name} to test location")
-            
-            # Verify restored files
-            for file in temp_dir.glob("*"):
-                original = self.backup_path / file.name
-                if file.exists() and original.exists():
-                    if file.stat().st_size == original.stat().st_size:
-                        print(f"✓ {file.name} restoration verified")
-            
-            # Cleanup
-            for file in temp_dir.glob("*"):
-                file.unlink()
-            temp_dir.rmdir()
-            
+            # Use a uniquely owned scratch directory so verification never
+            # collides with another run or removes pre-existing sibling files.
+            with tempfile.TemporaryDirectory(
+                prefix="rustchain_restore_",
+                dir=self.backup_path.parent,
+            ) as temp_name:
+                temp_dir = Path(temp_name)
+
+                # Copy files to temp for restoration test
+                for file in self.backup_path.glob("*"):
+                    if file.is_file():
+                        dest = temp_dir / file.name
+                        dest.write_bytes(file.read_bytes())
+                        print(f"✓ Restored {file.name} to test location")
+                
+                # Verify restored files
+                for file in temp_dir.glob("*"):
+                    original = self.backup_path / file.name
+                    if file.exists() and original.exists():
+                        if file.stat().st_size == original.stat().st_size:
+                            print(f"✓ {file.name} restoration verified")
+                
             return True
         except Exception as e:
             self.results["errors"].append(f"Restoration test failed: {e}")
