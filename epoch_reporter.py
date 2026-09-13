@@ -463,11 +463,14 @@ def notify_channels(
     telegram_token: str | None = None,
     telegram_chat_id: str | None = None,
 ) -> bool:
-    delivered = False
-    delivered = post_to_discord(discord_webhook, message) or delivered
-    delivered = post_to_slack(slack_webhook, message) or delivered
-    delivered = post_to_telegram(telegram_token, telegram_chat_id, message) or delivered
-    return delivered
+    delivery_results = []
+    if discord_webhook:
+        delivery_results.append(post_to_discord(discord_webhook, message))
+    if slack_webhook:
+        delivery_results.append(post_to_slack(slack_webhook, message))
+    if telegram_token and telegram_chat_id:
+        delivery_results.append(post_to_telegram(telegram_token, telegram_chat_id, message))
+    return bool(delivery_results) and all(delivery_results)
 
 
 def _notification_target_configured(
@@ -717,19 +720,26 @@ def run_once(
         current_epoch = epoch_data.get("epoch")
         if current_epoch is not None and current_epoch != state.get("last_epoch"):
             epoch_message = format_epoch_message(epoch_data, miners or [], node_url)
-            delivered = notify_channels(
+            channel_delivered = notify_channels(
                 epoch_message,
                 discord_webhook=discord_webhook,
                 slack_webhook=slack_webhook,
                 telegram_token=telegram_token,
                 telegram_chat_id=telegram_chat_id,
             )
-            if moltbook_key:
-                delivered = post_to_moltbook(moltbook_key, moltbook_url, epoch_message) or delivered
+            moltbook_delivered = (
+                post_to_moltbook(moltbook_key, moltbook_url, epoch_message)
+                if moltbook_key
+                else False
+            )
             epoch_target_configured = alert_target_configured or bool(moltbook_key)
-            if delivered or not epoch_target_configured:
+            delivery_complete = (
+                (channel_delivered or not alert_target_configured)
+                and (moltbook_delivered or not moltbook_key)
+            )
+            if delivery_complete:
                 state["last_epoch"] = current_epoch
-                if delivered:
+                if epoch_target_configured:
                     state["last_posted"] = now_iso()
             print(f"Observed new epoch {current_epoch}")
 
