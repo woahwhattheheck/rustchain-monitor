@@ -151,8 +151,8 @@ class BackupVerifier:
                     print(f"✓ Restored {file.name} to test location")
                 
                 # Verify every expected restored copy remains an ordinary file
-                # and exactly matches the source size. Missing or truncated
-                # copies must fail rather than silently passing restoration.
+                # and exactly matches the source. Missing, truncated, or
+                # same-length corrupted copies must fail closed.
                 for original, restored in restored_pairs:
                     if not _is_single_link_regular_file(restored):
                         raise ValueError(f"Unsafe or missing restored file: {restored.name}")
@@ -160,6 +160,13 @@ class BackupVerifier:
                         raise ValueError(f"Unsafe or missing source during restoration verification: {original.name}")
                     if restored.stat().st_size != original.stat().st_size:
                         raise ValueError(f"Restoration size mismatch: {restored.name}")
+
+                    restored_checksum = self.calculate_checksum(restored)
+                    original_checksum = self.calculate_checksum(original)
+                    if restored_checksum is None or original_checksum is None:
+                        raise ValueError(f"Unable to checksum restored entry: {restored.name}")
+                    if restored_checksum != original_checksum:
+                        raise ValueError(f"Restored content mismatch: {restored.name}")
                     print(f"✓ {restored.name} restoration verified")
                 
             self.results["restoration"] = True
