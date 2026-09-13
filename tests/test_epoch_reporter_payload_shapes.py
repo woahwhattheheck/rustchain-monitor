@@ -80,6 +80,56 @@ def test_mixed_miner_records_fail_closed_before_tracking_mutation():
     assert state == {}
 
 
+def test_structured_miner_identity_fails_closed_before_tracking_mutation():
+    state = {}
+
+    messages = epoch_reporter.update_miner_tracking(
+        state,
+        [{"miner": []}],
+        offline_polls=2,
+    )
+
+    assert messages == []
+    assert state == {}
+
+
+def test_run_once_ignores_structured_hardware_label_without_mutating_miners(monkeypatch):
+    monkeypatch.setattr(epoch_reporter, "fetch_health", lambda node_url: _healthy_payload())
+    monkeypatch.setattr(epoch_reporter, "fetch_epoch", lambda node_url: {"epoch": 77})
+    monkeypatch.setattr(
+        epoch_reporter,
+        "fetch_miners",
+        lambda node_url: [{"miner": "miner-a", "device_family": []}],
+    )
+    monkeypatch.setattr(epoch_reporter, "notify_channels", lambda message, **kwargs: True)
+
+    state = epoch_reporter.default_state()
+    state["tracked_miners"] = {
+        "miner-existing": {
+            "device_arch": "x86_64",
+            "last_attest": None,
+            "missed_polls": 1,
+            "offline_alerted": False,
+        }
+    }
+
+    updated = epoch_reporter.run_once(
+        "https://node.example",
+        state,
+        offline_polls=2,
+    )
+
+    assert updated["tracked_miners"] == {
+        "miner-existing": {
+            "device_arch": "x86_64",
+            "last_attest": None,
+            "missed_polls": 1,
+            "offline_alerted": False,
+        }
+    }
+    assert updated["last_epoch"] == 77
+
+
 def test_reward_helper_ignores_non_mapping_epoch_payloads():
     state = epoch_reporter.default_state()
 
