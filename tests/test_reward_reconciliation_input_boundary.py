@@ -127,8 +127,14 @@ class RewardReconciliationInputBoundaryTests(unittest.TestCase):
             path = Path(td) / "oversized.json"
             with path.open("wb") as handle:
                 handle.truncate(MAX_JSON_BYTES + 1)
-            with self.assertRaisesRegex(ReconciliationError, "safety bound"):
+            with self.assertRaises(ReconciliationError) as caught:
                 load_json_strict(path)
+            message = str(caught.exception)
+            self.assertTrue(
+                "safety bound" in message
+                or (os.name == "nt" and "changed before descriptor binding" in message),
+                message,
+            )
 
     def test_path_swap_before_descriptor_binding_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:

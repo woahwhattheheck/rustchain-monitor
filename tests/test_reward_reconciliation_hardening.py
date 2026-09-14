@@ -39,7 +39,7 @@ class RewardReconciliationHardeningTests(unittest.TestCase):
 
     def test_history_db_uri_quotes_special_path_characters(self):
         with tempfile.TemporaryDirectory() as td:
-            db = Path(td) / "history?special#name.db"
+            db = Path(td) / "history#special%name.db"
             conn = sqlite3.connect(db)
             conn.execute(
                 "CREATE TABLE miner_history (id INTEGER PRIMARY KEY, miner_id TEXT, observed_at REAL, epoch INTEGER, balance_rtc REAL)"
