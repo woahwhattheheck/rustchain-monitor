@@ -78,7 +78,7 @@ def test_output_pair_preflight_does_not_leave_partial_json_when_markdown_exists(
         assert markdown_out.read_text(encoding="utf-8") == "existing\n"
 
 
-def test_output_pair_rolls_back_first_file_if_second_create_races(monkeypatch):
+def test_output_pair_keeps_first_file_if_second_create_races(monkeypatch):
     import reward_casebook as mod
 
     with tempfile.TemporaryDirectory() as td:
@@ -95,8 +95,44 @@ def test_output_pair_rolls_back_first_file_if_second_create_races(monkeypatch):
             return real_write(path, text)
 
         monkeypatch.setattr(mod, "_write_new", racing_write)
-        with pytest.raises(CasebookError, match="refusing to overwrite existing file"):
-            mod._write_outputs(json_out, json.dumps({"ok": True}), markdown_out, "# report\n")
+        with pytest.raises(CasebookError, match="no rollback"):
+            mod._write_outputs(
+                json_out,
+                json.dumps({"ok": True}),
+                markdown_out,
+                "# report\n",
+            )
 
-        assert not json_out.exists()
+        assert json.loads(json_out.read_text(encoding="utf-8")) == {"ok": True}
+        assert markdown_out.read_text(encoding="utf-8") == "racer\n"
+
+
+def test_output_pair_never_deletes_replacement_of_first_file(monkeypatch):
+    import reward_casebook as mod
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        json_out = root / "casebook.json"
+        markdown_out = root / "casebook.md"
+        real_write = mod._write_new
+        calls = []
+
+        def racing_write(path, text):
+            calls.append(Path(path))
+            if len(calls) == 2:
+                json_out.unlink()
+                json_out.write_text("replacement\n", encoding="utf-8")
+                Path(path).write_text("racer\n", encoding="utf-8")
+            return real_write(path, text)
+
+        monkeypatch.setattr(mod, "_write_new", racing_write)
+        with pytest.raises(CasebookError, match="no rollback"):
+            mod._write_outputs(
+                json_out,
+                json.dumps({"ok": True}),
+                markdown_out,
+                "# report\n",
+            )
+
+        assert json_out.read_text(encoding="utf-8") == "replacement\n"
         assert markdown_out.read_text(encoding="utf-8") == "racer\n"

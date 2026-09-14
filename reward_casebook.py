@@ -9,19 +9,19 @@ expected reward, customer acceptance, or revenue.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from reward_reconciliation import (
-    ReconciliationError,
-    load_json_strict,
-    verify_reconciliation,
-)
+from reward_reconciliation import ReconciliationError, load_json_strict, verify_reconciliation
 
 MANIFEST_SCHEMA = "rustchain.reward-casebook-manifest/v1"
 CASEBOOK_SCHEMA = "rustchain.reward-casebook/v1"
@@ -34,6 +34,7 @@ DISPOSITION_STATUSES = frozenset({"ACKNOWLEDGED", "RESOLVED"})
 MANIFEST_KEYS = {"schema_version", "as_of", "entries", "dispositions"}
 ENTRY_KEYS = {"source", "artifact"}
 DISPOSITION_KEYS = {"case_id", "status", "updated_at", "note"}
+MAX_INPUT_BYTES = 64 * 1024 * 1024
 AUTHORITY = {
     "payout_owed": False,
     "expected_reward_inferred": False,
@@ -87,23 +88,191 @@ def _relative_path(value: Any, field: str) -> Path:
     path = Path(value)
     if path.is_absolute() or any(part == ".." for part in path.parts):
         raise CasebookError(f"{field} must stay within the manifest directory")
+    if not [part for part in path.parts if part not in ("", ".")]:
+        raise CasebookError(f"{field} must name a regular file")
     return path
 
 
-def _safe_input_path(base: Path, value: Any, field: str) -> Path:
-    relative = _relative_path(value, field)
-    root = base.resolve()
-    unresolved = base / relative
-    if unresolved.is_symlink():
-        raise CasebookError(f"{field} must not be a symlink")
-    candidate = unresolved.resolve()
+def _secure_open_supported() -> bool:
+    return (
+        os.name == "posix"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+    )
+
+
+def _open_flags(*, directory: bool = False) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    if directory:
+        flags |= os.O_DIRECTORY
+    return flags
+
+
+def _open_child(parent_fd: int, name: str, *, directory: bool, field: str) -> int:
     try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise CasebookError(f"{field} resolves outside the manifest directory") from exc
-    if not candidate.is_file():
-        raise CasebookError(f"{field} must resolve to an existing regular file")
-    return candidate
+        return os.open(name, _open_flags(directory=directory), dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise CasebookError(f"{field} must not traverse symlinks") from exc
+        if directory and exc.errno in (errno.ENOTDIR, errno.ENOENT):
+            try:
+                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError:
+                entry = None
+            if entry is not None and stat.S_ISLNK(entry.st_mode):
+                raise CasebookError(f"{field} must not traverse symlinks") from exc
+            raise CasebookError(f"{field} has a missing or non-directory component") from exc
+        if not directory and exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            raise CasebookError(f"{field} must resolve to an existing regular file") from exc
+        raise CasebookError(f"could not open {field}: {exc}") from exc
+
+
+def _open_absolute_parent(path: Path, field: str) -> tuple[int, str]:
+    if not _secure_open_supported():
+        raise CasebookError(
+            "secure descriptor-relative input loading is unsupported on this platform"
+        )
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    parts = [part for part in absolute.parts if part not in (absolute.anchor, "", ".")]
+    if not parts:
+        raise CasebookError(f"{field} must name a regular file")
+    try:
+        current_fd = os.open(absolute.anchor or os.sep, _open_flags(directory=True))
+    except OSError as exc:
+        raise CasebookError(f"could not open filesystem root for {field}: {exc}") from exc
+    try:
+        for part in parts[:-1]:
+            next_fd = _open_child(current_fd, part, directory=True, field=field)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, parts[-1]
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _open_relative_parent(root_fd: int, relative: Path, field: str) -> tuple[int, str]:
+    parts = [part for part in relative.parts if part not in ("", ".")]
+    if not parts:
+        raise CasebookError(f"{field} must name a regular file")
+    current_fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            next_fd = _open_child(current_fd, part, directory=True, field=field)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, parts[-1]
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_fd_bytes(fd: int, field: str) -> bytes:
+    """Read one already-validated descriptor. Kept separate for race hostiles."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(1024 * 1024, MAX_INPUT_BYTES + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_INPUT_BYTES:
+            raise CasebookError(f"{field} exceeds {MAX_INPUT_BYTES}-byte safety bound")
+    return b"".join(chunks)
+
+
+def _strict_json_bytes(data: bytes, field: str) -> Any:
+    def object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in out:
+                raise CasebookError(f"{field} has duplicate JSON key: {key}")
+            out[key] = value
+        return out
+
+    def reject_constant(value: str) -> None:
+        raise CasebookError(f"{field} contains non-finite JSON number: {value}")
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CasebookError(f"{field} must be UTF-8 JSON") from exc
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=object_no_duplicates,
+            parse_float=Decimal,
+            parse_int=int,
+            parse_constant=reject_constant,
+        )
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise CasebookError(f"{field} is not valid JSON: {exc}") from exc
+
+
+def _read_regular_json_at(
+    parent_fd: int,
+    name: str,
+    field: str,
+) -> tuple[Any, tuple[int, int]]:
+    file_fd = _open_child(parent_fd, name, directory=False, field=field)
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise CasebookError(f"{field} must resolve to an existing regular file")
+        if before.st_size > MAX_INPUT_BYTES:
+            raise CasebookError(f"{field} exceeds {MAX_INPUT_BYTES}-byte safety bound")
+        data = _read_fd_bytes(file_fd, field)
+        after = os.fstat(file_fd)
+        if _stat_signature(after) != _stat_signature(before):
+            raise CasebookError(f"{field} changed while it was being read")
+        try:
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise CasebookError(f"{field} changed while it was being read") from exc
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise CasebookError(f"{field} changed while it was being read")
+        return _strict_json_bytes(data, field), (before.st_dev, before.st_ino)
+    finally:
+        os.close(file_fd)
+
+
+def _read_absolute_json(path: str | Path, field: str) -> Any:
+    parent_fd, name = _open_absolute_parent(Path(path), field)
+    try:
+        value, _ = _read_regular_json_at(parent_fd, name, field)
+        return value
+    finally:
+        os.close(parent_fd)
+
+
+def _read_relative_json(
+    root_fd: int,
+    relative: Path,
+    field: str,
+) -> tuple[Any, tuple[int, int]]:
+    parent_fd, name = _open_relative_parent(root_fd, relative, field)
+    try:
+        return _read_regular_json_at(parent_fd, name, field)
+    finally:
+        os.close(parent_fd)
 
 
 def normalize_dispositions(value: Any, as_of_dt: datetime) -> dict[str, dict[str, str]]:
@@ -124,8 +293,8 @@ def normalize_dispositions(value: Any, as_of_dt: datetime) -> dict[str, dict[str
             raise CasebookError(f"{field}.case_id is malformed")
         if case_id in out:
             raise CasebookError(f"duplicate disposition for {case_id}")
-        status = item["status"]
-        if status not in DISPOSITION_STATUSES:
+        status_value = item["status"]
+        if status_value not in DISPOSITION_STATUSES:
             raise CasebookError(
                 f"{field}.status must be one of {sorted(DISPOSITION_STATUSES)}"
             )
@@ -136,7 +305,7 @@ def normalize_dispositions(value: Any, as_of_dt: datetime) -> dict[str, dict[str
         if type(note) is not str or len(note) > 2000:
             raise CasebookError(f"{field}.note must be a string no longer than 2000 chars")
         out[case_id] = {
-            "status": status,
+            "status": status_value,
             "updated_at": updated_at,
             "note": note,
         }
@@ -181,8 +350,7 @@ def compile_casebook(
 ) -> dict[str, Any]:
     as_of, as_of_dt = _utc(as_of, "as_of")
     normalized_dispositions = normalize_dispositions(
-        [] if dispositions is None else list(dispositions),
-        as_of_dt,
+        [] if dispositions is None else list(dispositions), as_of_dt
     )
     if not evidence_pairs:
         raise CasebookError("at least one evidence pair is required")
@@ -257,14 +425,13 @@ def compile_casebook(
                 raise CasebookError(f"duplicate material case identity: {case_id}")
             seen_case_ids.add(case_id)
             disposition = normalized_dispositions.get(case_id)
-            status = disposition["status"] if disposition else "OPEN"
+            status_value = disposition["status"] if disposition else "OPEN"
             updated_at = disposition["updated_at"] if disposition else None
             note = disposition["note"] if disposition else ""
             if updated_at is not None:
                 _, updated_dt = _utc(updated_at, f"disposition[{case_id}].updated_at")
                 _, observed_dt = _utc(
-                    transition["to_observed_at"],
-                    f"case[{case_id}].to_observed_at",
+                    transition["to_observed_at"], f"case[{case_id}].to_observed_at"
                 )
                 if updated_dt < observed_dt:
                     raise CasebookError(
@@ -275,7 +442,7 @@ def compile_casebook(
                 {
                     "case_id": case_id,
                     "miner_id": report["miner_id"],
-                    "status": status,
+                    "status": status_value,
                     "severity": severity,
                     "signals": list(transition["signals"]),
                     "from_observed_at": transition["from_observed_at"],
@@ -375,9 +542,7 @@ def verify_casebook(
         return False
     try:
         expected = compile_casebook(
-            evidence_pairs,
-            dispositions=dispositions,
-            as_of=as_of,
+            evidence_pairs, dispositions=dispositions, as_of=as_of
         )
     except CasebookError:
         return False
@@ -458,56 +623,62 @@ def load_manifest(path: str | Path) -> tuple[
     list[Mapping[str, Any]],
     str,
 ]:
-    manifest_path = Path(path).expanduser().absolute()
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise CasebookError("manifest must be an existing regular, non-symlink file")
+    manifest_path = Path(path).expanduser()
+    root_fd, manifest_name = _open_absolute_parent(manifest_path, "manifest")
     try:
-        manifest = load_json_strict(manifest_path)
-    except (OSError, ReconciliationError) as exc:
-        raise CasebookError(f"could not load manifest: {exc}") from exc
-    if type(manifest) is not dict or set(manifest) != MANIFEST_KEYS:
-        keys = set(manifest) if type(manifest) is dict else set()
-        raise CasebookError(
-            "manifest keys mismatch; "
-            f"missing={sorted(MANIFEST_KEYS - keys)}, "
-            f"unknown={sorted(keys - MANIFEST_KEYS)}"
-        )
-    if manifest["schema_version"] != MANIFEST_SCHEMA:
-        raise CasebookError(f"manifest schema_version must equal {MANIFEST_SCHEMA}")
-    as_of, as_of_dt = _utc(manifest["as_of"], "manifest.as_of")
-    normalize_dispositions(manifest["dispositions"], as_of_dt)
-    dispositions = manifest["dispositions"]
-
-    entries = manifest["entries"]
-    if type(entries) is not list or not entries:
-        raise CasebookError("manifest.entries must be a non-empty list")
-    if len(entries) > 1000:
-        raise CasebookError("manifest.entries exceeds 1000-entry safety bound")
-    pairs = []
-    base = manifest_path.parent
-    seen_paths: set[tuple[str, str]] = set()
-    for index, entry in enumerate(entries):
-        field = f"manifest.entries[{index}]"
-        if type(entry) is not dict or set(entry) != ENTRY_KEYS:
-            keys = set(entry) if type(entry) is dict else set()
+        manifest, _ = _read_regular_json_at(root_fd, manifest_name, "manifest")
+        if type(manifest) is not dict or set(manifest) != MANIFEST_KEYS:
+            keys = set(manifest) if type(manifest) is dict else set()
             raise CasebookError(
-                f"{field} keys mismatch; "
-                f"missing={sorted(ENTRY_KEYS - keys)}, "
-                f"unknown={sorted(keys - ENTRY_KEYS)}"
+                "manifest keys mismatch; "
+                f"missing={sorted(MANIFEST_KEYS - keys)}, "
+                f"unknown={sorted(keys - MANIFEST_KEYS)}"
             )
-        source_path = _safe_input_path(base, entry["source"], f"{field}.source")
-        artifact_path = _safe_input_path(base, entry["artifact"], f"{field}.artifact")
-        path_key = (str(source_path), str(artifact_path))
-        if path_key in seen_paths:
-            raise CasebookError(f"duplicate manifest entry at {index}")
-        seen_paths.add(path_key)
-        try:
-            source = load_json_strict(source_path)
-            artifact = load_json_strict(artifact_path)
-        except (OSError, ReconciliationError) as exc:
-            raise CasebookError(f"{field} could not be loaded: {exc}") from exc
-        pairs.append((source, artifact))
-    return pairs, dispositions, as_of
+        if manifest["schema_version"] != MANIFEST_SCHEMA:
+            raise CasebookError(
+                f"manifest schema_version must equal {MANIFEST_SCHEMA}"
+            )
+        as_of, as_of_dt = _utc(manifest["as_of"], "manifest.as_of")
+        normalize_dispositions(manifest["dispositions"], as_of_dt)
+        dispositions = manifest["dispositions"]
+
+        entries = manifest["entries"]
+        if type(entries) is not list or not entries:
+            raise CasebookError("manifest.entries must be a non-empty list")
+        if len(entries) > 1000:
+            raise CasebookError("manifest.entries exceeds 1000-entry safety bound")
+        pairs = []
+        seen_paths: set[tuple[str, str]] = set()
+        seen_files: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        for index, entry in enumerate(entries):
+            field = f"manifest.entries[{index}]"
+            if type(entry) is not dict or set(entry) != ENTRY_KEYS:
+                keys = set(entry) if type(entry) is dict else set()
+                raise CasebookError(
+                    f"{field} keys mismatch; "
+                    f"missing={sorted(ENTRY_KEYS - keys)}, "
+                    f"unknown={sorted(keys - ENTRY_KEYS)}"
+                )
+            source_relative = _relative_path(entry["source"], f"{field}.source")
+            artifact_relative = _relative_path(entry["artifact"], f"{field}.artifact")
+            path_identity = (str(source_relative), str(artifact_relative))
+            if path_identity in seen_paths:
+                raise CasebookError(f"duplicate manifest entry at {index}")
+            seen_paths.add(path_identity)
+            source, source_identity = _read_relative_json(
+                root_fd, source_relative, f"{field}.source"
+            )
+            artifact, artifact_identity = _read_relative_json(
+                root_fd, artifact_relative, f"{field}.artifact"
+            )
+            identity = (source_identity, artifact_identity)
+            if identity in seen_files:
+                raise CasebookError(f"duplicate manifest entry at {index}")
+            seen_files.add(identity)
+            pairs.append((source, artifact))
+        return pairs, dispositions, as_of
+    finally:
+        os.close(root_fd)
 
 
 def _write_new(path: str | Path, text: str) -> Path:
@@ -535,17 +706,14 @@ def _write_outputs(
         if target.exists() or target.is_symlink():
             raise CasebookError(f"refusing to overwrite existing file: {target}")
 
-    created: list[Path] = []
+    _write_new(json_target, json_text)
     try:
-        created.append(_write_new(json_target, json_text))
-        created.append(_write_new(markdown_target, markdown_text))
-    except Exception:
-        for target in reversed(created):
-            try:
-                target.unlink()
-            except FileNotFoundError:
-                pass
-        raise
+        _write_new(markdown_target, markdown_text)
+    except Exception as exc:
+        raise CasebookError(
+            f"{exc}; one or both output paths may remain; no rollback was "
+            "attempted because either pathname may have been replaced concurrently"
+        ) from exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -569,9 +737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pairs, dispositions, as_of = load_manifest(args.manifest)
         if args.command == "compile":
             artifact = compile_casebook(
-                pairs,
-                dispositions=dispositions,
-                as_of=as_of,
+                pairs, dispositions=dispositions, as_of=as_of
             )
             json_text = (
                 json.dumps(
@@ -590,12 +756,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 artifact["markdown"],
             )
             return 0
-        candidate = load_json_strict(args.artifact)
+        candidate = _read_absolute_json(args.artifact, "casebook artifact")
         ok = verify_casebook(
-            pairs,
-            candidate,
-            dispositions=dispositions,
-            as_of=as_of,
+            pairs, candidate, dispositions=dispositions, as_of=as_of
         )
         print(json.dumps({"ok": ok}, sort_keys=True))
         return 0 if ok else 1

@@ -12,6 +12,10 @@ A casebook manifest names original observation sources and the reconciliation ar
 
 A reconciliation with a changed transition, summary, receipt digest, Markdown body, miner identity, or source observation therefore cannot be promoted into the operator queue.
 
+Manifest, source, and reconciliation files are read through retained descriptor-relative directory custody. Every path component and final file is opened without following symlinks; the final descriptor must identify a regular file; bytes are consumed from that same descriptor; and the descriptor and directory entry identities are checked again after the read. A file replaced, relinked, or mutated during the read fails closed instead of changing the evidence generation being compiled.
+
+This secure loader requires POSIX descriptor-relative `open`/`stat` support and `O_NOFOLLOW`. A platform without those primitives fails closed before reading the manifest rather than falling back to a check-then-open path.
+
 Each accepted evidence set contributes its source, report, and Markdown SHA-256 identities. Material cases derive a stable `rcase-<sha256>` identifier from:
 
 - miner identity;
@@ -73,9 +77,9 @@ Schema: `rustchain.reward-casebook-manifest/v1`
 }
 ```
 
-All entry paths are relative to the manifest directory. Absolute paths, `..` traversal, symlink file inputs, duplicate entries, missing files, and more than 1,000 evidence entries fail closed.
+All entry paths are relative to the retained manifest-directory descriptor. Absolute paths, `..` traversal, symlinks in any path component, non-regular files, duplicate path pairs, hard-link aliases of an already supplied evidence pair, files that change while read, missing files, inputs larger than 64 MiB, and more than 1,000 evidence entries fail closed.
 
-The `as_of` field is explicit rather than reading the wall clock. This keeps case ages and receipts reproducible.
+The `as_of` field is explicit rather than reading the wall clock. This keeps case ages and receipts reproducible. Every verified reconciliation's complete observation horizon must be at or before `as_of`; later `INFO` evidence cannot influence an earlier snapshot.
 
 ## Compile and verify
 
@@ -111,7 +115,7 @@ Successful verification prints:
 {"ok": true}
 ```
 
-Compilation refuses to overwrite an existing JSON or Markdown output.
+Compilation preflights both output names and creates each file exclusively, so an existing JSON or Markdown file is never overwritten. Two independent files cannot be committed atomically on ordinary filesystems. If a concurrent writer wins the second pathname after the first output was created, compilation fails and deliberately leaves any path that now exists untouched. The error identifies that one or both outputs may remain. Inspect and remove only files you own before retrying. This truthful partial-output state is safer than pathname-based rollback, which could delete a concurrent writer's replacement.
 
 ## Output
 
