@@ -38,6 +38,8 @@ python reward_reconciliation.py compile examples/reward-observations.example.jso
   --markdown-out reward-report.md
 ```
 
+Portable source files and verification artifacts must be stable regular UTF-8 files. The reader refuses final-component symlinks/reparse points and special files, binds the opened descriptor to the inspected path, rejects mutation during the read, and enforces a 64 MiB byte ceiling before JSON parsing.
+
 Output paths are create-exclusive. Existing outputs are never overwritten.
 
 ## What it classifies
@@ -72,6 +74,6 @@ A verified artifact prints `{"ok": true}` and exits `0`. Tamper, schema drift, s
 
 ## Fail-closed boundaries
 
-The compiler rejects duplicate JSON keys, unknown fields, bool-as-number tricks, negative/nonfinite balances, negative/non-integer epochs, malformed miner IDs, duplicate or non-increasing observation times, unsupported timestamp offsets, and reports that do not exactly recompile.
+The compiler rejects non-regular, linked, unstable, oversized, or non-UTF-8 JSON trust roots; duplicate JSON keys; unknown fields; bool-as-number tricks; negative/nonfinite balances; negative/non-integer epochs; malformed miner IDs; duplicate or non-increasing observation times; unsupported timestamp offsets; and reports that do not exactly recompile.
 
 Every report carries explicit false authority for payout owed, expected reward inference, node/wallet/payout mutation, bounty submission, RTC transfer, payment acceptance, and revenue recognition.
