@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -27,6 +28,7 @@ OBS_KEYS = {"observed_at", "epoch", "balance_rtc"}
 MAX_DECIMAL_DIGITS = 256
 MAX_DECIMAL_EXPONENT = 128
 MAX_EPOCH = (1 << 63) - 1
+MAX_JSON_BYTES = 64 * 1024 * 1024
 AUTHORITY = {
     "payout_owed": False,
     "expected_reward_inferred": False,
@@ -53,18 +55,101 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _stable_file_snapshot(before: os.stat_result, after: os.stat_result) -> bool:
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    return all(getattr(before, field, None) == getattr(after, field, None) for field in fields)
+
+
+def _read_regular_json_bytes(path: str | Path) -> bytes:
+    source = Path(path).expanduser().absolute()
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    try:
+        path_info = source.lstat()
+    except OSError as exc:
+        raise ReconciliationError(f"cannot inspect JSON input {source}: {exc}") from exc
+
+    attrs = getattr(path_info, "st_file_attributes", 0)
+    if stat.S_ISLNK(path_info.st_mode) or (reparse and attrs & reparse):
+        raise ReconciliationError(f"JSON input must be a regular non-symlink file: {source}")
+    if not stat.S_ISREG(path_info.st_mode):
+        raise ReconciliationError(f"JSON input must be a regular file: {source}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise ReconciliationError(f"JSON input must be a regular non-symlink file: {source}") from exc
+        raise ReconciliationError(f"cannot open JSON input {source}: {exc}") from exc
+
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ReconciliationError(f"JSON input must be a regular file: {source}")
+        if not _stable_file_snapshot(path_info, before):
+            raise ReconciliationError(f"JSON input changed before descriptor binding: {source}")
+        if before.st_size > MAX_JSON_BYTES:
+            raise ReconciliationError(
+                f"JSON input exceeds {MAX_JSON_BYTES}-byte safety bound: {source}"
+            )
+
+        chunks: list[bytes] = []
+        remaining = MAX_JSON_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+        try:
+            path_after = source.lstat()
+        except OSError as exc:
+            raise ReconciliationError(f"JSON input path changed while being read: {source}") from exc
+    except ReconciliationError:
+        raise
+    except OSError as exc:
+        raise ReconciliationError(f"cannot read JSON input {source}: {exc}") from exc
+    finally:
+        os.close(fd)
+
+    after_attrs = getattr(path_after, "st_file_attributes", 0)
+    if stat.S_ISLNK(path_after.st_mode) or (reparse and after_attrs & reparse):
+        raise ReconciliationError(f"JSON input path changed while being read: {source}")
+    if len(payload) > MAX_JSON_BYTES:
+        raise ReconciliationError(f"JSON input exceeds {MAX_JSON_BYTES}-byte safety bound: {source}")
+    if (
+        len(payload) != before.st_size
+        or not _stable_file_snapshot(before, after)
+        or not _stable_file_snapshot(path_info, path_after)
+    ):
+        raise ReconciliationError(f"JSON input changed while being read: {source}")
+    return payload
+
+
 def load_json_strict(path: str | Path) -> Any:
     def reject_constant(value: str) -> None:
         raise ReconciliationError(f"non-finite JSON number is forbidden: {value}")
 
-    with open(Path(path), encoding="utf-8") as handle:
-        return json.load(
-            handle,
+    payload = _read_regular_json_bytes(path)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReconciliationError(f"JSON input is not valid UTF-8: {exc}") from exc
+    try:
+        return json.loads(
+            text,
             object_pairs_hook=_object,
             parse_float=Decimal,
             parse_int=int,
             parse_constant=reject_constant,
         )
+    except ReconciliationError:
+        raise
+    except ValueError as exc:
+        raise ReconciliationError(f"invalid JSON: {exc}") from exc
 
 
 def _decimal(value: Any, field: str) -> Decimal:
