@@ -74,8 +74,13 @@ def _read_regular_json_bytes(path: str | Path) -> bytes:
     if not stat.S_ISREG(path_info.st_mode):
         raise ReconciliationError(f"JSON input must be a regular file: {source}")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         fd = os.open(source, flags)
     except OSError as exc:
