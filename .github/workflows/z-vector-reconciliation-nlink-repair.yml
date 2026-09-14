@@ -1,0 +1,135 @@
+name: Z Vector reconciliation hardlink repair
+
+on:
+  push:
+    branches:
+      - z-vector/reconciliation-nlink-repair-20260914
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: z-vector/reconciliation-nlink-repair-20260914
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply exact reviewed repair
+        shell: python
+        run: |
+          from pathlib import Path
+
+          source_path = Path('reward_reconciliation.py')
+          source = source_path.read_text(encoding='utf-8')
+
+          old = '    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")'
+          new = '    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")'
+          if source.count(old) != 1:
+              raise SystemExit('stable snapshot preimage mismatch')
+          source = source.replace(old, new, 1)
+
+          old = '''    if not stat.S_ISREG(path_info.st_mode):
+              raise ReconciliationError(f"JSON input must be a regular file: {source}")
+
+          flags = ('''
+          new = '''    if not stat.S_ISREG(path_info.st_mode):
+              raise ReconciliationError(f"JSON input must be a regular file: {source}")
+          if path_info.st_nlink != 1:
+              raise ReconciliationError(f"JSON input must have exactly one hard link: {source}")
+
+          flags = ('''
+          if source.count(old) != 1:
+              raise SystemExit('path single-link preimage mismatch')
+          source = source.replace(old, new, 1)
+
+          old = '''        if not stat.S_ISREG(before.st_mode):
+              raise ReconciliationError(f"JSON input must be a regular file: {source}")
+          if not _stable_file_snapshot(path_info, before):'''
+          new = '''        if not stat.S_ISREG(before.st_mode):
+              raise ReconciliationError(f"JSON input must be a regular file: {source}")
+          if before.st_nlink != 1:
+              raise ReconciliationError(f"JSON input must have exactly one hard link: {source}")
+          if not _stable_file_snapshot(path_info, before):'''
+          if source.count(old) != 1:
+              raise SystemExit('descriptor single-link preimage mismatch')
+          source = source.replace(old, new, 1)
+
+          old = '''    if stat.S_ISLNK(path_after.st_mode) or (reparse and after_attrs & reparse):
+              raise ReconciliationError(f"JSON input path changed while being read: {source}")
+          if len(payload) > MAX_JSON_BYTES:'''
+          new = '''    if stat.S_ISLNK(path_after.st_mode) or (reparse and after_attrs & reparse):
+              raise ReconciliationError(f"JSON input path changed while being read: {source}")
+          if after.st_nlink != 1 or path_after.st_nlink != 1:
+              raise ReconciliationError(f"JSON input must have exactly one hard link: {source}")
+          if len(payload) > MAX_JSON_BYTES:'''
+          if source.count(old) != 1:
+              raise SystemExit('post-read single-link preimage mismatch')
+          source = source.replace(old, new, 1)
+          source_path.write_text(source, encoding='utf-8')
+
+          test_path = Path('tests/test_reward_reconciliation_input_boundary.py')
+          tests = test_path.read_text(encoding='utf-8')
+          marker = '''    def test_invalid_utf8_is_normalized_to_reconciliation_error(self):
+'''
+          test = '''    def test_hard_link_fails_closed_and_preserves_both_names(self):
+              if not hasattr(os, "link"):
+                  self.skipTest("hard links unavailable")
+              with tempfile.TemporaryDirectory() as td:
+                  root = Path(td)
+                  path = root / "source.json"
+                  alias = root / "source-alias.json"
+                  payload = json.dumps(self.valid_source()).encode("utf-8")
+                  path.write_bytes(payload)
+                  try:
+                      os.link(path, alias)
+                  except (NotImplementedError, OSError) as exc:
+                      self.skipTest(f"hard links unavailable: {exc}")
+                  self.assertEqual(path.stat().st_nlink, 2)
+                  with self.assertRaisesRegex(ReconciliationError, "exactly one hard link"):
+                      load_json_strict(path)
+                  self.assertEqual(path.read_bytes(), payload)
+                  self.assertEqual(alias.read_bytes(), payload)
+                  self.assertTrue(path.exists())
+                  self.assertTrue(alias.exists())
+
+'''
+          if tests.count(marker) != 1:
+              raise SystemExit('test insertion preimage mismatch')
+          tests = tests.replace(marker, test + marker, 1)
+          test_path.write_text(tests, encoding='utf-8')
+
+          docs_path = Path('docs/reward-reconciliation.md')
+          docs = docs_path.read_text(encoding='utf-8')
+          old = 'Portable source files and verification artifacts must be stable regular UTF-8 files.'
+          new = 'Portable source files and verification artifacts must be stable, single-link regular UTF-8 files.'
+          if docs.count(old) != 1:
+              raise SystemExit('docs preimage mismatch')
+          docs = docs.replace(old, new, 1)
+          old = 'The reader refuses final-component symlinks/reparse points and special files, binds the opened descriptor to the inspected path, rejects mutation during the read, and enforces a 64 MiB byte ceiling before JSON parsing.'
+          new = 'The reader refuses final-component symlinks/reparse points, hard-linked inputs, and special files; binds link count plus the opened descriptor to the inspected path; rejects mutation during the read; and enforces a 64 MiB byte ceiling before JSON parsing.'
+          if docs.count(old) != 1:
+              raise SystemExit('docs contract preimage mismatch')
+          docs = docs.replace(old, new, 1)
+          docs_path.write_text(docs, encoding='utf-8')
+      - name: Verify exact repair
+        run: |
+          python -m py_compile reward_reconciliation.py tests/test_reward_reconciliation.py tests/test_reward_reconciliation_hardening.py tests/test_reward_reconciliation_input_boundary.py
+          python -m unittest -v tests.test_reward_reconciliation tests.test_reward_reconciliation_hardening tests.test_reward_reconciliation_input_boundary
+          python -O -m unittest -v tests.test_reward_reconciliation tests.test_reward_reconciliation_hardening tests.test_reward_reconciliation_input_boundary
+          tmp="$(mktemp -d)"
+          python reward_reconciliation.py compile examples/reward-observations.example.json --json-out "$tmp/report.json" --markdown-out "$tmp/report.md"
+          python reward_reconciliation.py verify examples/reward-observations.example.json "$tmp/report.json"
+      - name: Commit verified donor bytes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/z-vector-reconciliation-nlink-repair.yml
+          git add reward_reconciliation.py tests/test_reward_reconciliation_input_boundary.py docs/reward-reconciliation.md
+          git commit -m "fix: reject hard-linked reconciliation trust roots [skip ci]"
+          git push origin HEAD:z-vector/reconciliation-nlink-repair-20260914
