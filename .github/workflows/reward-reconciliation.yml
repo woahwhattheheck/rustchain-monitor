@@ -6,6 +6,7 @@ on:
       - "reward_reconciliation.py"
       - "tests/test_reward_reconciliation.py"
       - "tests/test_reward_reconciliation_hardening.py"
+      - "tests/test_reward_reconciliation_input_boundary.py"
       - "examples/reward-observations.example.json"
       - "docs/reward-reconciliation.md"
       - ".github/workflows/reward-reconciliation.yml"
@@ -14,6 +15,7 @@ on:
       - "reward_reconciliation.py"
       - "tests/test_reward_reconciliation.py"
       - "tests/test_reward_reconciliation_hardening.py"
+      - "tests/test_reward_reconciliation_input_boundary.py"
       - "examples/reward-observations.example.json"
       - "docs/reward-reconciliation.md"
       - ".github/workflows/reward-reconciliation.yml"
@@ -23,10 +25,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -38,17 +41,21 @@ jobs:
           python -m py_compile reward_reconciliation.py
           tests/test_reward_reconciliation.py
           tests/test_reward_reconciliation_hardening.py
+          tests/test_reward_reconciliation_input_boundary.py
       - name: Unit tests
         run: >-
           python -m unittest -v
           tests.test_reward_reconciliation
           tests.test_reward_reconciliation_hardening
+          tests.test_reward_reconciliation_input_boundary
       - name: Optimized-mode tests
         run: >-
           python -O -m unittest -v
           tests.test_reward_reconciliation
           tests.test_reward_reconciliation_hardening
+          tests.test_reward_reconciliation_input_boundary
       - name: Example compile and verify
+        shell: bash
         run: |
           tmp="$(mktemp -d)"
           python reward_reconciliation.py compile examples/reward-observations.example.json \
