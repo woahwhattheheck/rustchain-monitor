@@ -1,0 +1,11 @@
+{
+  "schema_version": "rustchain.reward-casebook-manifest/v1",
+  "as_of": "2026-09-13T10:00:00Z",
+  "entries": [
+    {
+      "source": "reward-observations.json",
+      "artifact": "reward-reconciliation.json"
+    }
+  ],
+  "dispositions": []
+}

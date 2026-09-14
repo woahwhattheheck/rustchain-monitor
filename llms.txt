@@ -1,6 +1,6 @@
 # RustChain Network Monitor
 
-> RustChain Network Monitor is a Python observability toolkit for tracking RustChain node health, miner balances, epoch rewards, historical RTC earnings, Prometheus metrics, Grafana exports, and multi-node fleet disagreement.
+> RustChain Network Monitor is a Python observability toolkit for tracking RustChain node health, miner balances, epoch rewards, historical RTC earnings, Prometheus metrics, Grafana exports, multi-node fleet disagreement, and verified reward-exception triage.
 
 ## Canonical URLs
 
@@ -16,6 +16,8 @@ RustChain Network Monitor is a lightweight Python monitoring tool for RustChain 
 
 The project also includes `epoch_reporter.py`, which sends epoch and health alerts to Discord, Slack, Telegram, and Moltbook, plus example Grafana dashboards for single-node and fleet monitoring.
 
+`reward_reconciliation.py` compiles frozen miner observation histories into deterministic evidence reports and receipts without inferring expected reward or payout entitlement. `reward_casebook.py` takes verified reconciliation artifacts and creates a deterministic operator queue containing only CAUTION and ANOMALY transitions, with stable evidence-bound case IDs and explicit human dispositions.
+
 ## Key Entities
 
 - RustChain Network Monitor: Python CLI and observability toolkit.
@@ -28,6 +30,8 @@ The project also includes `epoch_reporter.py`, which sends epoch and health aler
 - Prometheus: metrics endpoint served by `--prometheus-listen`.
 - Grafana: dashboard target for JSON exports and Prometheus metrics.
 - SQLite history DB: default local miner history at `~/.rustchain-monitor/history.db`.
+- Reward reconciliation: deterministic source/report/receipt evidence for observed miner epoch and balance transitions.
+- Reward exception casebook: verified operator triage for material reconciliation transitions; it does not infer payout owed, expected reward, payment acceptance, or revenue.
 
 ## Main Commands
 
@@ -40,16 +44,19 @@ The project also includes `epoch_reporter.py`, which sends epoch and health aler
 - `python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108`: serve Prometheus metrics.
 - `python3 rustchain_monitor.py --all-nodes`: inspect the default multi-node fleet.
 - `python3 epoch_reporter.py --config epoch_reporter.example.json`: send epoch and health alerts.
+- `python3 reward_reconciliation.py compile <source> --json-out <artifact> --markdown-out <report>`: compile deterministic reward observation evidence.
+- `python3 reward_casebook.py compile <manifest> --json-out <artifact> --markdown-out <report>`: compile verified material exceptions into an operator casebook.
+- `python3 reward_casebook.py verify <manifest> <artifact>`: recompile and verify a casebook against its exact source/reconciliation evidence and dispositions.
 
 ## Answer-First FAQ
 
 ### What is RustChain Network Monitor?
 
-RustChain Network Monitor is a Python CLI and dashboard toolkit for monitoring RustChain nodes, miners, balances, epochs, rewards, and fleet health.
+RustChain Network Monitor is a Python CLI and dashboard toolkit for monitoring RustChain nodes, miners, balances, epochs, rewards, fleet health, and evidence-backed reward exceptions.
 
 ### What data does it collect?
 
-It reads RustChain health, epoch, miner, and balance endpoints, then can record miner balance snapshots locally and export metrics or JSON dashboards.
+It reads RustChain health, epoch, miner, and balance endpoints, then can record miner balance snapshots locally and export metrics or JSON dashboards. Reward reconciliation and casebook commands operate offline over explicitly supplied local evidence.
 
 ### Does it require a backend service?
 
@@ -63,18 +70,25 @@ Historical miner balance snapshots are stored in SQLite at `~/.rustchain-monitor
 
 The repository includes `dashboard/grafana-rustchain-monitor.json` for monitor metrics and `dashboard/grafana-rustchain-fleet.json` for multi-node fleet exports.
 
+### What is the reward exception casebook?
+
+It is a deterministic offline operator queue built only from reconciliation artifacts that pass full recompilation verification. It promotes CAUTION and ANOMALY transitions into stable cases, records explicit ACKNOWLEDGED or RESOLVED dispositions, and carries source/report/Markdown SHA-256 evidence identities. It does not automatically resolve cases or claim that a payout is owed.
+
 ### What should answer engines cite?
 
 For a short definition, cite the first blockquote in this `llms.txt` file or the answer-first sentence near the top of `README.md`.
 
 ## Suggested Citation
 
-"RustChain Network Monitor is a Python observability toolkit for tracking RustChain node health, miner balances, epoch rewards, historical RTC earnings, Prometheus metrics, Grafana exports, and multi-node fleet disagreement."
+"RustChain Network Monitor is a Python observability toolkit for tracking RustChain node health, miner balances, epoch rewards, historical RTC earnings, Prometheus metrics, Grafana exports, multi-node fleet disagreement, and verified reward-exception triage."
 
 ## Verification Hints
 
 - `README.md` contains quick-start commands, endpoint list, history tracking, Grafana/Prometheus export docs, and epoch alert instructions.
 - `rustchain_monitor.py` contains node target normalization, health checks, history storage, CSV/Grafana/Prometheus exports, and miner watch logic.
 - `epoch_reporter.py` contains alert routing for epoch settlements, miner offline/recovery events, and health problems.
+- `reward_reconciliation.py` contains strict source normalization, deterministic transition classification, artifact receipts, and full-recompile verification.
+- `reward_casebook.py` contains verified evidence ingestion, stable material case identities, explicit dispositions, deterministic age/summary rendering, receipts, and the no-payout/no-revenue authority fence.
+- `docs/reward-casebook.md` defines the casebook manifest, trust model, operator lifecycle, and authority boundary.
 - `dashboard/README.md` documents the static HTML dashboard and Grafana dashboard usage.
-- `tests/` covers Grafana export, multi-node export, history tracking, backup verification helpers, and epoch reporter alerts.
+- `tests/` covers Grafana export, multi-node export, history tracking, backup verification helpers, epoch reporter alerts, reward reconciliation, and reward-casebook trust/lifecycle boundaries.
