@@ -31,6 +31,12 @@ Yes. With `--record-history`, miner balance snapshots are stored in SQLite at `~
 
 It observes the RustChain Proof-of-Antiquity network and helps operators verify node health, miner participation, and RTC reward flow.
 
+## Related Elyan Labs tools
+
+[Beacon Atlas](https://rustchain.org/beacon/) complements RustChain Network Monitor by showing agent identity, liveness, and provenance, while this project focuses on chain, node, miner, and reward observability. Operators can use the two together to distinguish network-health problems from agent-level availability or provenance questions.
+
+_Disclosure: this related-tool mention was added as part of a compensated Elyan Labs bounty._
+
 ## Features
 
 ✅ **Live Epoch Tracking** - Watch epoch settlements as they happen  
