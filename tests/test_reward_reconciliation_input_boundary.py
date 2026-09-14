@@ -49,6 +49,48 @@ class RewardReconciliationInputBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReconciliationError, "non-symlink"):
                 load_json_strict(link)
 
+    def test_hard_link_fails_closed(self):
+        if not hasattr(os, "link"):
+            self.skipTest("hard-link creation unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "source.json"
+            alias = root / "source-alias.json"
+            path.write_text(json.dumps(self.valid_source()), encoding="utf-8")
+            try:
+                os.link(path, alias)
+            except OSError as exc:
+                self.skipTest(f"hard-link creation unavailable: {exc}")
+            self.assertGreaterEqual(path.stat().st_nlink, 2)
+            with self.assertRaisesRegex(ReconciliationError, "exactly one hard link"):
+                load_json_strict(path)
+
+    def test_hard_link_created_during_read_fails_closed(self):
+        if not hasattr(os, "link"):
+            self.skipTest("hard-link creation unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "source.json"
+            alias = root / "source-alias.json"
+            path.write_text(json.dumps(self.valid_source()), encoding="utf-8")
+            original_read = os.read
+            linked = False
+
+            def link_after_first_read(fd: int, count: int) -> bytes:
+                nonlocal linked
+                chunk = original_read(fd, count)
+                if chunk and not linked:
+                    try:
+                        os.link(path, alias)
+                    except OSError as exc:
+                        self.skipTest(f"hard-link creation unavailable: {exc}")
+                    linked = True
+                return chunk
+
+            with patch("reward_reconciliation.os.read", side_effect=link_after_first_read):
+                with self.assertRaisesRegex(ReconciliationError, "exactly one hard link"):
+                    load_json_strict(path)
+
     def test_fifo_fails_closed_without_opening_stream(self):
         if not hasattr(os, "mkfifo"):
             self.skipTest("FIFO creation unavailable")

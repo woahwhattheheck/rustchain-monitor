@@ -25,10 +25,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +55,7 @@ jobs:
           tests.test_reward_reconciliation_hardening
           tests.test_reward_reconciliation_input_boundary
       - name: Example compile and verify
+        shell: bash
         run: |
           tmp="$(mktemp -d)"
           python reward_reconciliation.py compile examples/reward-observations.example.json \

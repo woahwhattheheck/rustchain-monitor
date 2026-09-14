@@ -56,8 +56,72 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _stable_file_snapshot(before: os.stat_result, after: os.stat_result) -> bool:
-    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
     return all(getattr(before, field, None) == getattr(after, field, None) for field in fields)
+
+
+def _require_single_link_regular(info: os.stat_result, source: Path) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        raise ReconciliationError(f"JSON input must be a regular file: {source}")
+    if getattr(info, "st_nlink", None) != 1:
+        raise ReconciliationError(f"JSON input must have exactly one hard link: {source}")
+
+
+def _windows_change_time(fd: int, source: Path) -> int:
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_info = kernel32.GetFileInformationByHandleEx
+        get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        get_info.restype = wintypes.BOOL
+        basic = FileBasicInfo()
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+        if not get_info(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+            error = ctypes.get_last_error()
+            raise OSError(error, "GetFileInformationByHandleEx(FileBasicInfo) failed")
+        return int(basic.ChangeTime)
+    except (ImportError, OSError, ValueError) as exc:
+        raise ReconciliationError(
+            f"cannot acquire mutation-sensitive generation token for JSON input {source}: {exc}"
+        ) from exc
+
+
+def _descriptor_snapshot(fd: int, source: Path) -> tuple[os.stat_result, int]:
+    if os.name == "nt":
+        token_before = _windows_change_time(fd, source)
+        info = os.fstat(fd)
+        token_after = _windows_change_time(fd, source)
+        if token_before != token_after:
+            raise ReconciliationError(f"JSON input changed while being inspected: {source}")
+        return info, token_after
+
+    info = os.fstat(fd)
+    token = getattr(info, "st_ctime_ns", None)
+    if token is None:
+        raise ReconciliationError(
+            f"mutation-sensitive generation token unavailable for JSON input: {source}"
+        )
+    return info, int(token)
 
 
 def _read_regular_json_bytes(path: str | Path) -> bytes:
@@ -71,8 +135,7 @@ def _read_regular_json_bytes(path: str | Path) -> bytes:
     attrs = getattr(path_info, "st_file_attributes", 0)
     if stat.S_ISLNK(path_info.st_mode) or (reparse and attrs & reparse):
         raise ReconciliationError(f"JSON input must be a regular non-symlink file: {source}")
-    if not stat.S_ISREG(path_info.st_mode):
-        raise ReconciliationError(f"JSON input must be a regular file: {source}")
+    _require_single_link_regular(path_info, source)
 
     flags = (
         os.O_RDONLY
@@ -89,9 +152,8 @@ def _read_regular_json_bytes(path: str | Path) -> bytes:
         raise ReconciliationError(f"cannot open JSON input {source}: {exc}") from exc
 
     try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise ReconciliationError(f"JSON input must be a regular file: {source}")
+        before, before_change = _descriptor_snapshot(fd, source)
+        _require_single_link_regular(before, source)
         if not _stable_file_snapshot(path_info, before):
             raise ReconciliationError(f"JSON input changed before descriptor binding: {source}")
         if before.st_size > MAX_JSON_BYTES:
@@ -108,7 +170,8 @@ def _read_regular_json_bytes(path: str | Path) -> bytes:
             chunks.append(chunk)
             remaining -= len(chunk)
         payload = b"".join(chunks)
-        after = os.fstat(fd)
+        after, after_change = _descriptor_snapshot(fd, source)
+        _require_single_link_regular(after, source)
         try:
             path_after = source.lstat()
         except OSError as exc:
@@ -123,10 +186,12 @@ def _read_regular_json_bytes(path: str | Path) -> bytes:
     after_attrs = getattr(path_after, "st_file_attributes", 0)
     if stat.S_ISLNK(path_after.st_mode) or (reparse and after_attrs & reparse):
         raise ReconciliationError(f"JSON input path changed while being read: {source}")
+    _require_single_link_regular(path_after, source)
     if len(payload) > MAX_JSON_BYTES:
         raise ReconciliationError(f"JSON input exceeds {MAX_JSON_BYTES}-byte safety bound: {source}")
     if (
         len(payload) != before.st_size
+        or before_change != after_change
         or not _stable_file_snapshot(before, after)
         or not _stable_file_snapshot(path_info, path_after)
     ):
