@@ -58,6 +58,28 @@ class RewardReconciliationInputBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReconciliationError, "regular file"):
                 load_json_strict(path)
 
+    def test_regular_path_swapped_to_fifo_cannot_block_open(self):
+        if not hasattr(os, "mkfifo") or not getattr(os, "O_NONBLOCK", 0):
+            self.skipTest("nonblocking FIFO open unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "source.json"
+            path.write_text(json.dumps(self.valid_source()), encoding="utf-8")
+            original_open = os.open
+            swapped = False
+
+            def swap_to_fifo_then_open(target, flags, *args, **kwargs):
+                nonlocal swapped
+                if not swapped:
+                    swapped = True
+                    path.unlink()
+                    os.mkfifo(path)
+                    self.assertTrue(flags & os.O_NONBLOCK)
+                return original_open(target, flags, *args, **kwargs)
+
+            with patch("reward_reconciliation.os.open", side_effect=swap_to_fifo_then_open):
+                with self.assertRaisesRegex(ReconciliationError, "regular file"):
+                    load_json_strict(path)
+
     def test_oversized_sparse_file_fails_before_parse(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "oversized.json"
