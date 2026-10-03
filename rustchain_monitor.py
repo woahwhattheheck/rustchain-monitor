@@ -1057,6 +1057,7 @@ class RustChainMonitor:
     def get_miner_balance(self, miner_id: str) -> float:
         """Get specific miner's RTC balance"""
         response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
+        response.raise_for_status()
         return response.json().get("balance_rtc", 0.0)
 
     def collect_network_snapshot(self) -> dict:

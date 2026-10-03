@@ -1,6 +1,10 @@
 import csv
+import json
 import sys
 from pathlib import Path
+
+import pytest
+import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,6 +12,50 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import rustchain_monitor
+
+
+@pytest.mark.parametrize("status_code", [404, 500])
+def test_balance_http_error_does_not_record_false_history(tmp_path, monkeypatch, status_code):
+    db_path = tmp_path / "history.db"
+    monitor = rustchain_monitor.RustChainMonitor(history_db_path=db_path)
+    balances = iter([
+        (200, {"balance_rtc": 12.5}),
+        (status_code, {"error": "balance unavailable"}),
+        (200, {"balance_rtc": 14.5}),
+        (200, {"balance_rtc": 0.0}),
+    ])
+
+    def get_response(url):
+        response = requests.Response()
+        response.url = url
+        response.status_code = 200
+        if "/wallet/balance?" in url:
+            response.status_code, payload = next(balances)
+        elif url.endswith("/epoch"):
+            payload = {"epoch": 100}
+        else:
+            payload = []
+        response._content = json.dumps(payload).encode("utf-8")
+        return response
+
+    monkeypatch.setattr(monitor.session, "get", get_response)
+
+    def record_current_balance():
+        snapshot = monitor.get_miner_snapshot("miner-a")
+        monitor.record_history("miner-a", snapshot)
+
+    record_current_balance()
+    with pytest.raises(requests.HTTPError):
+        record_current_balance()
+    record_current_balance()
+    record_current_balance()
+
+    with rustchain_monitor._history_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT balance_rtc, delta_rtc FROM miner_history ORDER BY id"
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [(12.5, 0.0), (14.5, 2.0), (0.0, -14.5)]
 
 
 def test_record_history_snapshot_skips_duplicate_latest_point(tmp_path):
