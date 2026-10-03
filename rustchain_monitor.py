@@ -19,6 +19,7 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import sys
 import sqlite3
 import time
@@ -1216,8 +1217,19 @@ class RustChainMonitor:
         return extract_miner_list(self._get_json("/api/miners"))
 
     def get_miner_balance(self, miner_id: str) -> float:
-        """Get specific miner's RTC balance"""
-        return _coerce_float(self._get_json(f"/wallet/balance?miner_id={miner_id}").get("balance_rtc"), 0.0)
+        """Get a valid RTC balance without turning unavailable data into zero."""
+        payload = self._get_json(f"/wallet/balance?miner_id={miner_id}")
+        raw_balance = payload.get("balance_rtc")
+        error = "/wallet/balance: missing or invalid balance_rtc"
+        if isinstance(raw_balance, bool):
+            raise NodeLivenessError(error)
+        try:
+            balance = float(raw_balance)
+        except (TypeError, ValueError, OverflowError):
+            raise NodeLivenessError(error) from None
+        if not math.isfinite(balance):
+            raise NodeLivenessError(error)
+        return balance
 
     def collect_network_snapshot(self) -> dict:
         """Collect a single network snapshot for export surfaces.
