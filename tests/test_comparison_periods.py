@@ -63,3 +63,41 @@ def test_custom_window_preserves_empty_history(tmp_path):
     assert rows[0]["recent_gain"] == 0.0
     assert rows[0]["daily_average"] == 0.0
     assert rows[0]["snapshots"] == 0
+
+
+def test_comparison_preserves_latest_tie_metadata_and_negative_gain(tmp_path):
+    db_path = tmp_path / "history.db"
+    record(db_path, "withdrawn", 30, 20.0, 1)
+    record(db_path, "withdrawn", 0, 18.0, 2)
+    record(db_path, "withdrawn", 0, 12.0, 3)
+    record(db_path, "stale", 50, 4.0, 1)
+    record(db_path, "stale", 40, 9.0, 2)
+
+    rows = compare_miner_history(
+        db_path,
+        miner_ids=["withdrawn", "missing", "stale", "withdrawn"],
+        now_ts=NOW,
+        days=14,
+    )
+
+    assert [row["miner_id"] for row in rows] == [
+        "stale", "missing", "withdrawn", "withdrawn"
+    ]
+    assert rows[0]["recent_gain"] == 0.0
+    assert rows[0]["snapshots"] == 2
+    assert rows[1] == {
+        "miner_id": "missing", "snapshots": 0, "latest_balance": 0.0,
+        "recent_gain": 0.0, "daily_average": 0.0,
+        "latest_epoch": None, "last_seen": None,
+    }
+    assert rows[2] == rows[3] == {
+        "miner_id": "withdrawn", "snapshots": 3, "latest_balance": 12.0,
+        "recent_gain": -8.0, "daily_average": -8.0 / 14,
+        "latest_epoch": 3, "last_seen": NOW,
+    }
+
+
+def test_empty_comparison_does_not_create_history_database(tmp_path):
+    db_path = tmp_path / "absent" / "history.db"
+    assert compare_miner_history(db_path, miner_ids=[], now_ts=NOW, days=14) == []
+    assert not db_path.exists()

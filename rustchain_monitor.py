@@ -22,6 +22,7 @@ import json
 import sys
 import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -387,21 +388,36 @@ def compare_miner_history(
     """Compare miners by gain over the requested number of days and current balance."""
     now_ts = time.time() if now_ts is None else now_ts
     rows = []
-    for miner_id in miner_ids:
-        summary = get_history_summary(db_path, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
-        with _history_connection(db_path) as conn:
+    if not miner_ids:
+        return rows
+
+    # A comparison needs counts and the latest balance, not each miner's full
+    # retained history, daily chart, or the other summary-window calculations.
+    with closing(_history_connection(db_path)) as conn:
+        for miner_id in miner_ids:
+            latest = conn.execute(
+                """
+                SELECT observed_at, balance_rtc, epoch,
+                    (SELECT COUNT(*) FROM miner_history WHERE miner_id = ?) AS snapshots
+                FROM miner_history
+                WHERE miner_id = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """,
+                (miner_id, miner_id),
+            ).fetchone()
             recent_gain = _period_gain(conn, miner_id, now_ts, days)
-        rows.append(
-            {
-                "miner_id": miner_id,
-                "snapshots": summary["snapshots"],
-                "latest_balance": summary["latest_balance"],
-                "recent_gain": recent_gain,
-                "daily_average": (recent_gain / days) if days else recent_gain,
-                "latest_epoch": summary["latest_epoch"],
-                "last_seen": summary["last_seen"],
-            }
-        )
+            rows.append(
+                {
+                    "miner_id": miner_id,
+                    "snapshots": latest["snapshots"] if latest else 0,
+                    "latest_balance": float(latest["balance_rtc"]) if latest else 0.0,
+                    "recent_gain": recent_gain,
+                    "daily_average": (recent_gain / days) if days else recent_gain,
+                    "latest_epoch": latest["epoch"] if latest else None,
+                    "last_seen": float(latest["observed_at"]) if latest else None,
+                }
+            )
     rows.sort(key=lambda row: (-row["recent_gain"], -row["latest_balance"], row["miner_id"]))
     return rows
 
