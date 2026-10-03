@@ -25,16 +25,17 @@ def test_balance_http_error_does_not_record_false_history(tmp_path, monkeypatch,
         (200, {"balance_rtc": 0.0}),
     ])
 
-    def get_response(url):
+    def get_response(url, **kwargs):
         response = requests.Response()
         response.url = url
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         if "/wallet/balance?" in url:
             response.status_code, payload = next(balances)
         elif url.endswith("/epoch"):
             payload = {"epoch": 100}
         else:
-            payload = []
+            payload = {"miners": []}
         response._content = json.dumps(payload).encode("utf-8")
         return response
 
@@ -45,7 +46,7 @@ def test_balance_http_error_does_not_record_false_history(tmp_path, monkeypatch,
         monitor.record_history("miner-a", snapshot)
 
     record_current_balance()
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(rustchain_monitor.NodeLivenessError, match=f"HTTP {status_code}"):
         record_current_balance()
     record_current_balance()
     record_current_balance()
