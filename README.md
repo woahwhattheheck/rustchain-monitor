@@ -295,6 +295,24 @@ python3 epoch_reporter.py --config epoch_reporter.example.json
 
 See [epoch_reporter.example.json](epoch_reporter.example.json) for the supported config keys.
 
+The epoch reporter verifies HTTPS certificates and hostnames. Operators upgrading
+from the earlier reporter must configure trust for private or self-signed nodes;
+an untrusted certificate now follows the existing fetch-error path and its epoch
+data is not recorded. The configured node URL is unchanged.
+
+Use a certificate issued by a trusted CA, or set `REQUESTS_CA_BUNDLE` to a PEM
+bundle obtained from the node operator through a trusted channel. The node
+certificate must also match the hostname or IP address in `--node`. For example:
+
+```bash
+REQUESTS_CA_BUNDLE=/path/to/trusted-ca-bundle.pem \
+  python3 epoch_reporter.py --node https://your-node.example --once
+```
+
+This CA bundle also applies to the reporter's HTTPS notification requests. When
+using public notification services alongside a private node, include their
+required public roots in the bundle as well.
+
 ## Contributing
 
 Found a bug? Want to add features? PRs welcome!

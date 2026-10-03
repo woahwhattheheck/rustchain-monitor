@@ -33,7 +33,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-import urllib3
 
 
 DEFAULT_NODE = "https://50.28.86.131"
@@ -43,9 +42,6 @@ DEFAULT_MOLTBOOK_URL = "https://moltbook.ai/api/v1"
 DEFAULT_OFFLINE_POLLS = 2
 DEFAULT_TIP_AGE_MAX = 100
 DEFAULT_BACKUP_AGE_MAX_HOURS = 6.0
-
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def default_state() -> dict:
@@ -98,7 +94,7 @@ def save_state(state_file: str, state: dict) -> None:
 
 def _fetch_json(node_url: str, path: str, label: str):
     try:
-        response = requests.get(f"{node_url}{path}", timeout=10, verify=False)
+        response = requests.get(f"{node_url}{path}", timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
