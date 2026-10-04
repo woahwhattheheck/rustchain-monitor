@@ -533,6 +533,8 @@ def compare_miner_history(
     # A comparison needs counts and the latest balance, not each miner's full
     # retained history, daily chart, or the other summary-window calculations.
     with closing(_history_connection(db_path)) as conn:
+        # Keep metadata and gains coherent while history writers add snapshots.
+        conn.execute("BEGIN")
         for miner_id in miner_ids:
             latest = conn.execute(
                 """
