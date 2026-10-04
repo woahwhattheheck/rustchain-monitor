@@ -427,6 +427,13 @@ def _period_gain(conn: sqlite3.Connection, miner_id: str, now_ts: float, days: i
         """,
         (miner_id,),
     ).fetchone()
+    return _period_gain_from_latest(conn, miner_id, cutoff_ts, latest)
+
+
+def _period_gain_from_latest(
+    conn: sqlite3.Connection, miner_id: str, cutoff_ts: float, latest
+) -> float:
+    """Calculate the window gain from an already selected latest row."""
     if not latest or float(latest["observed_at"]) < cutoff_ts:
         return 0.0
 
@@ -547,7 +554,9 @@ def compare_miner_history(
                 """,
                 (miner_id, miner_id),
             ).fetchone()
-            recent_gain = _period_gain(conn, miner_id, now_ts, days)
+            recent_gain = _period_gain_from_latest(
+                conn, miner_id, now_ts - (days * 86400), latest
+            )
             rows.append(
                 {
                     "miner_id": miner_id,
